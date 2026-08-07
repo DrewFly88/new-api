@@ -92,7 +92,7 @@ DeepSeek API:
 
 ### 2.4 适用范围（关键设计约束）
 
-**守护逻辑的触发判定必须绑定到"模型名前缀 = `deepseek-v4-`"，而非"渠道类型 = DeepSeek（type=43）"。**
+**守护逻辑的触发判定必须绑定到"模型名模糊匹配 `deepseek-v4`"，而非"渠道类型 = DeepSeek（type=43）"。**
 
 理由：`reasoning_content` 丢失问题是**模型协议特性**（DeepSeek V4 thinking mode 的要求），与渠道类型无关。new-api 中 `deepseek-v4-*` 模型实际会经以下渠道路径触发同一个 400：
 
@@ -106,9 +106,9 @@ DeepSeek API:
 **因此守护逻辑的判定位置不能放在 `relay/channel/deepseek/adaptor.go` 内**（那只覆盖渠道类型=43 的路径，会把 ali、OpenAI 透传、聚合渠道全部排除在外），而应提升到 **relay 入口层的请求分发前置阶段**，按模型名统一嗅探：
 
 - 判定输入：入站请求的 `model` 字段（或经渠道模型映射后的 `UpstreamModelName`）
-- 判定规则：`strings.HasPrefix(modelName, "deepseek-v4-")`
+- 判定规则：**模糊匹配** `strings.Contains(strings.ToLower(modelName), "deepseek-v4")`——大小写不敏感 + 容忍前后缀（第三方供应商的 `DeepSeek-V4-Pro`、`v4-deepseek-pro`、`deepseekv4-pro` 等变体均命中）
 - 判定位置：渠道 adaptor 的 `ConvertOpenAIRequest` / `ConvertClaudeRequest` 调用**之前**的共用前置阶段，对所有走 OpenAI/Claude/Responses 格式且模型名匹配的请求统一生效
-- 渠道级开关：仍保留 `deepseek_reasoning_guard` / `deepseek_reasoning_cache` 字段，但**任何渠道**只要承载了 `deepseek-v4-*` 模型即生效（UI 上渠道设置项的条件渲染从"渠道类型=DeepSeek"改为"渠道路由或当前模型名匹配 deepseek-v4"）
+- 渠道级开关：仍保留 `deepseek_reasoning_guard` / `deepseek_reasoning_cache` 字段，但**任何渠道**只要承载了 `deepseek-v4-*` 模型即生效（UI 上渠道设置项的条件渲染从"渠道类型=DeepSeek"改为"渠道路由或当前模型名模糊匹配 deepseek-v4"）
 
 > 详见第 4.1 节判定模块归属的调整，以及第 5.4 节"Claude 格式对称处理"因此降级。
 
@@ -175,7 +175,8 @@ type ChannelSettings struct {
 
 ```go
 // DetectIfDeepSeekV4 按模型名嗅探是否为 DeepSeek V4 系列。
-// 判定规则：strings.HasPrefix(modelName, "deepseek-v4-")。
+// 判定规则：模糊匹配 strings.Contains(strings.ToLower(modelName), "deepseek-v4")
+// ——大小写不敏感 + 容忍前后缀，覆盖第三方供应商的 DeepSeek-V4-Pro / v4-deepseek-pro / deepseekv4-pro 等变体。
 // 这是守护逻辑的总闸门——与渠道类型无关，覆盖 DeepSeek 渠道、ali 渠道、OpenAI 透传、聚合渠道所有路径。
 func DetectIfDeepSeekV4(modelName string) bool
 
@@ -322,7 +323,7 @@ type ReasoningContentCache interface {
 #### 步骤 3.2 — `web/src/features/channels/components/drawers/channel-mutate-drawer.tsx`
 
 - 在"额外设置"区域（紧邻 `thinking_to_content` 表单项，约 line 4097-4110）新增三个 `FormField`
-- **条件渲染**：当渠道路由或当前模型名匹配 `deepseek-v4-*` 时显示（覆盖 DeepSeek 渠道、ali 渠道、OpenAI 透传、聚合渠道等所有承载 deepseek-v4 的路径；不再仅按渠道类型=DeepSeek 判断，详见第 2.4 节适用范围）
+- **条件渲染**：当渠道路由或当前模型名模糊匹配 `deepseek-v4`（大小写不敏感 + 容忍前后缀）时显示（覆盖 DeepSeek 渠道、ali 渠道、OpenAI 透传、聚合渠道等所有承载 deepseek-v4 的路径；不再仅按渠道类型=DeepSeek 判断，详见第 2.4 节适用范围）
 - 字符串文案通过 i18n key（English source string），由 `bun run i18n:sync` 同步到各语言
 
 #### 步骤 3.3 — i18n 文案

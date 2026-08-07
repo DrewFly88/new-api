@@ -752,6 +752,7 @@ export function ChannelMutateDrawer({
   const currentDisableTaskPollingSleep = form.watch(
     'disable_task_polling_sleep'
   )
+  const watchDeepseekReasoningCache = form.watch('deepseek_reasoning_cache')
   const currentProxy = form.watch('proxy')
   const currentHttpProtocol = form.watch('http_protocol')
   const currentHttp2ConnectionShards = form.watch('http2_connection_shards')
@@ -921,6 +922,18 @@ export function ChannelMutateDrawer({
   const currentModelsArray = useMemo(
     () => parseModelsString(currentModels),
     [currentModels]
+  )
+
+  // DeepSeek V4 reasoning_content guard is shown only when the channel's
+  // configured models include a deepseek-v4-* model. Triggered by model
+  // name prefix, not channel type.
+  // Fuzzy match: case-insensitive + tolerates wrap/dropped-dash variants
+  // from third-party suppliers (e.g. "DeepSeek-V4-Pro", "v4-deepseek-pro").
+  const hasDeepSeekV4Model = useMemo(
+    () => currentModelsArray.some((m) =>
+      m.toLowerCase().includes('deepseek-v4')
+    ),
+    [currentModelsArray]
   )
 
   const currentTypeLabel = useMemo(
@@ -4111,7 +4124,7 @@ export function ChannelMutateDrawer({
                                       </FormLabel>
                                       <FormDescription>
                                         {t(
-                                          'Convert reasoning_content to <think> tag in content'
+                                          'Convert reasoning_content to ⇪ tag in content'
                                         )}
                                       </FormDescription>
                                     </div>
@@ -4124,6 +4137,91 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              {hasDeepSeekV4Model && (
+                                <FormField
+                                  control={form.control}
+                                  name='deepseek_reasoning_guard_disabled'
+                                  render={({ field }) => (
+                                    <FormItem className='flex items-center justify-between px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t('Disable DeepSeek V4 reasoning_content guard')}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Opt out of missing reasoning_content detection and conservative backfill on DeepSeek V4 thinking-mode tool-calling turns'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
+
+                              {hasDeepSeekV4Model && (
+                                <FormField
+                                  control={form.control}
+                                  name='deepseek_reasoning_cache'
+                                  render={({ field }) => (
+                                    <FormItem className='flex items-center justify-between px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t('DeepSeek V4 reasoning_content cache (server-side backfill)')}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Cache reasoning_content across requests and conservatively backfill missing fields (requires multi-turn traffic to flow through this gateway from turn one)'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
+
+                              {hasDeepSeekV4Model && watchDeepseekReasoningCache && (
+                                <FormField
+                                  control={form.control}
+                                  name='deepseek_reasoning_cache_ttl_ms'
+                                  render={({ field }) => (
+                                    <FormItem className='flex flex-col gap-1 px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t('DeepSeek V4 reasoning_content cache TTL (ms)')}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'How long cached reasoning_content stays valid for conservative backfill'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <input
+                                          type='number'
+                                          className='w-full rounded border px-2 py-1 text-sm'
+                                          value={field.value ?? 3600000}
+                                          onChange={(e) =>
+                                            field.onChange(Number(e.target.value))
+                                          }
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
 
                               <FormField
                                 control={form.control}

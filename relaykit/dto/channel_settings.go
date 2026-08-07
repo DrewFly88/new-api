@@ -23,6 +23,18 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+
+	// DeepSeek V4 reasoning_content integrity guard (see
+	// docs/channel/deepseek-v4-reasoning-guard.md). Triggered by model name
+	// prefix "deepseek-v4-" regardless of channel type.
+	//
+	// DeepseekReasoningGuardDisabled is the explicit opt-out: zero-value
+	// (false) means "not set" → guard stays default-on. Reusing a plain
+	// DeepseekReasoningGuard bool for both "default on" and "explicit off"
+	// is ambiguous, so the opt-out lives in a separate field.
+	DeepseekReasoningGuardDisabled bool   `json:"deepseek_reasoning_guard_disabled,omitempty"`
+	DeepseekReasoningCache         bool   `json:"deepseek_reasoning_cache,omitempty"`
+	DeepseekReasoningCacheTTL      int64  `json:"deepseek_reasoning_cache_ttl_ms,omitempty"`
 }
 
 const (

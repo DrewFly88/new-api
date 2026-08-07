@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	reasoning_guard "github.com/QuantumNous/new-api/relay/reasoning_guard"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -42,6 +44,14 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	err = helper.ModelMappedHelper(c, info, request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
+	}
+
+	// DeepSeek V4 reasoning_content guard: L1 diagnosis + L2 conservative
+	// backfill. Runs after ModelMappedHelper (so UpstreamModelName is set)
+	// and before the channel adaptor converts/forwards the request.
+	// No-op for non-deepseek-v4-* models.
+	if _, gErr := reasoning_guard.ApplyGuardRequest(c.Request.Context(), reasoning_guard.DefaultCache(), info, request); gErr != nil {
+		return types.NewError(fmt.Errorf("reasoning_guard apply failed: %w", gErr), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
 	includeUsage := true
@@ -196,6 +206,17 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		httpResp = resp.(*http.Response)
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
 		if httpResp.StatusCode != http.StatusOK {
+			// DeepSeek V4 reasoning_content guard L3: detect the upstream
+			// "reasoning_content must be passed back" 400 and tag the response
+			// with X-Newapi-Reasoning-Guard so clients can react. No-op for
+			// non-deepseek-v4-* models.
+			bodyBytes, readErr := io.ReadAll(httpResp.Body)
+			httpResp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			if readErr != nil {
+				common.SysError(fmt.Sprintf("reasoning_guard L3 read body error: %v", readErr))
+			} else {
+				reasoning_guard.MaybeEnhanceErrorResponse(info, httpResp, bodyBytes)
+			}
 			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
@@ -208,6 +229,16 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		// reset status code 重置状态码
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return newApiErr
+	}
+
+	// DeepSeek V4 reasoning_content guard L2 capture: on non-streaming
+	// OpenAI/Responses success, store the upstream reasoning_content keyed
+	// by tool_call_id so a later turn can conservatively backfill. No-op for
+	// non-deepseek-v4-* models or when the channel cache is disabled.
+	if usage != nil {
+		if textResp, ok := usage.(*dto.OpenAITextResponse); ok && textResp != nil {
+			reasoning_guard.CaptureResponseReasoning(c.Request.Context(), reasoning_guard.DefaultCache(), info, textResp)
+		}
 	}
 
 	var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0

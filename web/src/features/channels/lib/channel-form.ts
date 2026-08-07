@@ -278,6 +278,11 @@ export const channelFormSchema = z
     allow_speed: z.boolean().optional(), // Anthropic: speed mode control
     claude_beta_query: z.boolean().optional(), // Anthropic: beta query passthrough
     disable_task_polling_sleep: z.boolean().optional(),
+    // DeepSeek V4 reasoning_content integrity guard (triggered by model name prefix "deepseek-v4-")
+    // deepseek_reasoning_guard_disabled is the explicit opt-out: unset/false → guard default-on.
+    deepseek_reasoning_guard_disabled: z.boolean().optional(),
+    deepseek_reasoning_cache: z.boolean().optional(),
+    deepseek_reasoning_cache_ttl_ms: z.number().int().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
@@ -450,6 +455,10 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   allow_speed: false,
   claude_beta_query: false,
   disable_task_polling_sleep: false,
+  // DeepSeek V4 reasoning_content integrity guard
+  deepseek_reasoning_guard_disabled: false,
+  deepseek_reasoning_cache: false,
+  deepseek_reasoning_cache_ttl_ms: 3600000,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
@@ -514,6 +523,9 @@ export function transformChannelToFormDefaults(
   let allowSpeed = false
   let claudeBetaQuery = false
   let disableTaskPollingSleep = false
+  let deepseekReasoningGuardDisabled = false
+  let deepseekReasoningCache = false
+  let deepseekReasoningCacheTTL = 3600000
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
@@ -534,6 +546,12 @@ export function transformChannelToFormDefaults(
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
+      deepseekReasoningGuardDisabled = parsed.deepseek_reasoning_guard_disabled === true
+      deepseekReasoningCache = parsed.deepseek_reasoning_cache === true
+      deepseekReasoningCacheTTL =
+        typeof parsed.deepseek_reasoning_cache_ttl_ms === 'number'
+          ? parsed.deepseek_reasoning_cache_ttl_ms
+          : 3600000
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
       upstreamModelUpdateAutoSyncEnabled =
@@ -592,6 +610,9 @@ export function transformChannelToFormDefaults(
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
     disable_task_polling_sleep: disableTaskPollingSleep,
+    deepseek_reasoning_guard_disabled: deepseekReasoningGuardDisabled,
+    deepseek_reasoning_cache: deepseekReasoningCache,
+    deepseek_reasoning_cache_ttl_ms: deepseekReasoningCacheTTL,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
@@ -624,6 +645,18 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {
     settingObj.http2_connection_shards = shards
+  }
+
+  // DeepSeek V4 reasoning_content integrity guard.
+  // Only emit when non-default to keep setting JSON lean for non-deepseek channels.
+  if (formData.deepseek_reasoning_guard_disabled) {
+    settingObj.deepseek_reasoning_guard_disabled = true
+  }
+  if (formData.deepseek_reasoning_cache) {
+    settingObj.deepseek_reasoning_cache = true
+  }
+  if (formData.deepseek_reasoning_cache_ttl_ms !== 3600000) {
+    settingObj.deepseek_reasoning_cache_ttl_ms = formData.deepseek_reasoning_cache_ttl_ms
   }
 
   return JSON.stringify(settingObj)
