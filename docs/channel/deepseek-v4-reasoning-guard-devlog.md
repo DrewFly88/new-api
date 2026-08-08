@@ -345,6 +345,68 @@ code_review 第 4 节记录的 6 个 findings（P1/P2/P2/P3/P3/P3）在本轮验
 | P3 Deepseek/DeepSeek 命名不一致 | 保留（验证期无外部引用冲突；重命名是 API 变更，推迟） |
 | P3 io.ReadAll 错误被吞 | `TestMaybeEnhanceErrorResponse` 5 个 noop 分支 + 1 个注入分支覆盖 400 路径；`MaybeEnhanceErrorResponse` 对 nil 入参安全退出 |
 
+### 5.7 第二轮验证执行结果（2026-08-08，按 `deepseek-v4-reasoning-guard-round2-test.md` 执行）
+
+> 本轮覆盖第二轮更新（commit `18c8783a`：Claude 格式 L2 回填 + 流式响应 L2 捕获）的云端 Go 环境测试。
+
+#### 5.7.1 第二轮 Bug 清单
+
+共 1 处，在阶段 `go vet` 中直接暴露并修复：
+
+| # | 严重度 | 位置 | 症状 | 修复 |
+|---|---|---|---|---|
+| **B5** | 编译阻断 | [wire.go:233](file:///workspace/new-api/relay/reasoning_guard/wire.go#L233) `CollectStreamReasoning` | `vet: relay/reasoning_guard/wire.go:233:12: undefined: common` — 新增函数引用 `common.UnmarshalJsonStr`，但 import 别名是 `newapicommon` | 改为 `newapicommon.UnmarshalJsonStr` |
+
+#### 5.7.2 命令矩阵执行结果（10/10 通过）
+
+| # | 命令 | 范围 | 预期 | 实际结果 |
+|---|---|---|---|---|
+| 1 | `go build ./...` | 根模块编译 | exit 0 | ✅ exit 0（仅 `web/dist` embed 常态告警） |
+| 2 | `cd relaykit && GOWORK=off go build ./...` | relaykit 独立编译 | exit 0 | ✅ exit 0 |
+| 3 | `go vet ./relay/reasoning_guard/...` | 静态检查 | exit 0 | ✅ exit 0（修复 B5 后干净） |
+| 4 | `go test -count=1 ./relay/reasoning_guard/...` | 全套件单次运行 | 17 套件全 PASS | ✅ **17 套件全 PASS** |
+| 5 | `go test -race -count=1 ./relay/reasoning_guard/...` | 全套件 + 竞争检测 | 同上 + 无 race | ✅ `ok 1.174s`，无 `WARNING: DATA RACE` |
+| 6 | `TestBackfillClaudeConservative -v` | **本轮新增** Claude 回填 | 4 子用例 PASS | ✅ 4/4 PASS |
+| 7 | `TestCaptureStreamResponseReasoning -v` | **本轮新增** 流式捕获 | 6 子用例 PASS | ✅ 6/6 PASS |
+| 8 | `TestCollectStreamReasoning -v` | **本轮新增** 分片解析 | 6 子用例 PASS | ✅ 6/6 PASS |
+| 9 | `TestEndToEndCacheLifecycle\|TestL3WireFromGuardEnabled` | 集成回归 | 2 套件全 PASS | ✅ 5 子用例全 PASS |
+| 10 | `TestBackfillOpenAIConservative\|TestBackfillClaudeConservative` | OpenAI + Claude 回填对称 | 两套件全 PASS | ✅ 8 子用例全 PASS |
+
+#### 5.7.3 17 个测试套件清单（全部 PASS）
+
+| 套件 | 来源 | 子用例数 |
+|---|---|---|
+| `TestDetectIfDeepSeekV4` | 第一轮 | 14 |
+| `TestDetectReasoningContentGapOpenAI` | 第一轮 | 6 |
+| `TestDetectReasoningContentGapClaude` | 第一轮 | 2 |
+| `TestBackfillOpenAIConservative` | 第一轮 | 4 |
+| `TestInMemoryCacheTTL` | 第一轮 | 1 |
+| `TestEndToEndCacheLifecycle` | 第一轮集成 | 1 |
+| `TestL3WireFromGuardEnabled` | 第一轮集成 | 4 |
+| `TestMaybeEnhanceErrorResponse` | 第一轮 wire | 6 |
+| `TestGuardEnabled` | 第一轮 wire | 5 |
+| `TestCacheEnabled` | 第一轮 wire | 4 |
+| `TestCacheTTL` | 第一轮 wire | 3 |
+| `TestDefaultCacheSingleton` | 第一轮 wire | 1 |
+| `TestCaptureResponseReasoning` | 第一轮 wire | 5 |
+| `TestCaptureRace` | 第一轮 wire | 1 |
+| **`TestBackfillClaudeConservative`** | **本轮新增** | **4** |
+| **`TestCaptureStreamResponseReasoning`** | **本轮新增** | **6** |
+| **`TestCollectStreamReasoning`** | **本轮新增** | **6** |
+
+**累计统计**：17 个测试套件 × 73 个子用例全部通过，`-race` 无数据竞争。
+
+#### 5.7.4 本轮不变式校验要点
+
+| 不变式 | 测试套件 | 关键断言 | 结果 |
+|---|---|---|---|
+| Claude thinking block 注入在 tool_use 之前 | `TestBackfillClaudeConservative` "full hit" | `blocks[0].Type == "thinking"` 且 `len(blocks) == 原始+1` | ✅ |
+| 空 `ToolCallIDs` 不注入空 thinking block（P2 修复） | `TestBackfillClaudeConservative` "empty cache" | `firstThinkingText == ""` 且 `toolUseCount == 2` | ✅ |
+| 流式分片 reasoning_content 正确拼接 | `TestCollectStreamReasoning` "multiple choices" | `frag == "ab"` | ✅ |
+| 流式 tool_call_id 去重 | `TestCaptureStreamResponseReasoning` "stores all" | `len(hits) == 2`，两 id 均命中 | ✅ |
+| 非法 JSON 分片不 panic | `TestCollectStreamReasoning` "invalid JSON" | 返回零值，无 panic | ✅ |
+| `StreamGuardActive` 门外置（P3 修复） | `TestCaptureStreamResponseReasoning` "cache disabled" | cache 无写入 | ✅ |
+
 ---
 
 ## 6. AGENTS.md 合规性自查
@@ -372,10 +434,12 @@ code_review 第 4 节记录的 6 个 findings（P1/P2/P2/P3/P3/P3）在本轮验
 
 ### 7.2 待办遗留
 
-1. **✅ Claude 格式 L2 回填**（2026-08-08 完成）：`Backfill` 已新增 `backfillClaude` 分支，在保守命中（全部 tool_use id 命中 + 同 turn + 未过期）时把 thinking content block 注入到 assistant message 的 content 数组头部（在 tool_use blocks 之前）。已加空 `ToolCallIDs` 守卫防止注入空 thinking block（code_review P2 修复）。测试见 `guard_test.go::TestBackfillClaudeConservative`（4 子用例：全部命中/部命中/跨turn/空缓存）。
-2. **✅ 流式响应 L2 捕获**（2026-08-08 完成）：`wire.go` 新增 `CaptureStreamResponseReasoning`（流结束后一次性 Store）+ `CollectStreamReasoning`（每分片解析累加）+ `StreamGuardActive`（循环外门谓词）。`OaiStreamHandler` 在 `StreamScannerHandler` 回调中累加分片（reasoning_content 拼接 + tool_call_id 去重），流结束后调用 `CaptureStreamResponseReasoning`。门用 `StreamGuardActive` 提到循环外，非 DeepSeek 流式流量不付额外 JSON 解析代价（code_review P3 修复）。测试见 `wire_test.go::TestCaptureStreamResponseReasoning`（6 子用例）+ `TestCollectStreamReasoning`（6 子用例）。
+1. **✅ Claude 格式 L2 回填**（2026-08-08 完成，第二轮验证通过）：`Backfill` 已新增 `backfillClaude` 分支，在保守命中（全部 tool_use id 命中 + 同 turn + 未过期）时把 thinking content block 注入到 assistant message 的 content 数组头部（在 tool_use blocks 之前）。已加空 `ToolCallIDs` 守卫防止注入空 thinking block（code_review P2 修复）。测试见 `guard_test.go::TestBackfillClaudeConservative`（4 子用例：全部命中/部命中/跨turn/空缓存），**第二轮验证结果见 §5.7.2 命令 #6（4/4 PASS）**。
+2. **✅ 流式响应 L2 捕获**（2026-08-08 完成，第二轮验证通过）：`wire.go` 新增 `CaptureStreamResponseReasoning`（流结束后一次性 Store）+ `CollectStreamReasoning`（每分片解析累加）+ `StreamGuardActive`（循环外门谓词）。`OaiStreamHandler` 在 `StreamScannerHandler` 回调中累加分片（reasoning_content 拼接 + tool_call_id 去重），流结束后调用 `CaptureStreamResponseReasoning`。门用 `StreamGuardActive` 提到循环外，非 DeepSeek 流式流量不付额外 JSON 解析代价（code_review P3 修复）。测试见 `wire_test.go::TestCaptureStreamResponseReasoning`（6 子用例）+ `TestCollectStreamReasoning`（6 子用例），**第二轮验证结果见 §5.7.2 命令 #7/#8（12/12 PASS）**。
 3. **🔲 真渠道端到端验证**：在真实 DeepSeek V4 渠道 + thinking 模式 + 多轮 tool-calling 场景做 E2E（需有效 API key）。
 4. **🔲 `Deepseek` 命名清理**：后续将 struct 字段 `DeepseekReasoningGuardDisabled`/`DeepseekReasoningCache`/`DeepseekReasoningCacheTTL` 统一为 `DeepSeek` 前缀（P3 可选清理项，属 API 变更需单独迁移文档）。
+
+> **第二轮验证总结**：按 [`deepseek-v4-reasoning-guard-round2-test.md`](./deepseek-v4-reasoning-guard-round2-test.md) 执行 10 条命令矩阵全部通过（§5.7.2），发现并修复 1 处编译阻断 Bug B5（§5.7.1），累计 17 套件 × 73 子用例全绿，`-race` 无数据竞争。
 
 ### 7.3 最终交付物清单（代码 + 文档）
 
@@ -388,7 +452,8 @@ code_review 第 4 节记录的 6 个 findings（P1/P2/P2/P3/P3/P3）在本轮验
   - i18n：7 个 locale 文件，新增 6 个 key
 - **文档**：
   - [deepseek-v4-reasoning-guard.md](./deepseek-v4-reasoning-guard.md)（设计）
-  - [deepseek-v4-reasoning-guard-verification-plan.md](./deepseek-v4-reasoning-guard-verification-plan.md)（验证规划）
-  - 本文件（DevLog：实现 + review + 验证全链路记录）
+  - [deepseek-v4-reasoning-guard-verification-plan.md](./deepseek-v4-reasoning-guard-verification-plan.md)（第一轮验证规划）
+  - [deepseek-v4-reasoning-guard-round2-test.md](./deepseek-v4-reasoning-guard-round2-test.md)（第二轮验证规划）
+  - 本文件（DevLog：实现 + review + 第一轮/第二轮验证全链路记录）
 
-详见验证测试规划文档：[`deepseek-v4-reasoning-guard-verification-plan.md`](./deepseek-v4-reasoning-guard-verification-plan.md)。
+详见验证测试规划文档：[`deepseek-v4-reasoning-guard-verification-plan.md`](./deepseek-v4-reasoning-guard-verification-plan.md)（第一轮）、[`deepseek-v4-reasoning-guard-round2-test.md`](./deepseek-v4-reasoning-guard-round2-test.md)（第二轮）。

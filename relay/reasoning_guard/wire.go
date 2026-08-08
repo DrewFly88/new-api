@@ -230,7 +230,7 @@ func CaptureStreamResponseReasoning(ctx context.Context, cache ReasoningContentC
 // per-chunk JSON parse.
 func CollectStreamReasoning(chunk []byte) (reasoningFragment string, toolCallIDs []string) {
 	var streamResp dto.ChatCompletionsStreamResponse
-	if err := common.UnmarshalJsonStr(string(chunk), &streamResp); err != nil {
+	if err := newapicommon.UnmarshalJsonStr(string(chunk), &streamResp); err != nil {
 		return "", nil
 	}
 	for _, choice := range streamResp.Choices {
