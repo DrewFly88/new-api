@@ -28,18 +28,20 @@
 
 ## 2. 变更文件清单
 
-共变更 18 个文件（9 新增 + 9 修改），分布在后端、前端、i18n 三个区域。
+共变更 **20 个文件（11 新增 + 9 修改）**，分布在后端、前端、i18n 三个区域。
 
-### 2.1 后端（6 文件：4 新增 + 2 修改）
+### 2.1 后端（8 文件：6 新增 + 2 修改）
 
-| 文件 | 类型 | 职责 |
-|---|---|---|
-| `relay/reasoning_guard/guard.go` | 新增 | L1 诊断核心：`DetectIfDeepSeekV4` 模型名嗅探 + `DetectReasoningContentGap` format-agnostic 诊断（OpenAI/Claude 双格式分派） |
-| `relay/reasoning_guard/cache.go` | 新增 | L2 缓存：`ReasoningContentCache` 接口 + `Backfill` 保守回填策略 + 进程内/Redis 双实现 |
-| `relay/reasoning_guard/wire.go` | 新增 | relay 入口层集成钩子：`ApplyGuardRequest`(L1+L2) / `CaptureResponseReasoning`(L2 Store) / `MaybeEnhanceErrorResponse`(L3) + `DefaultCache()` 进程级单例 |
-| `relay/reasoning_guard/guard_test.go` | 新增 | 表驱动回归测试：模型名嗅探边界 + OpenAI/Claude 格式诊断 + 保守回填策略（全部命中/部命中/跨turn/空缓存）+ TTL 驱逐 |
-| `relaykit/dto/channel_settings.go` | 修改 | 新增 3 字段：`DeepseekReasoningGuardDisabled` / `DeepseekReasoningCache` / `DeepseekReasoningCacheTTL` |
-| `relay/compatible_handler.go` | 修改 | TextHelper 接入：前置阶段诊断+回填（ModelMappedHelper 后）、响应阶段 L3 引导（400+reasoning_content）、DoResponse 后 L2 捕获 |
+| 文件 | 类型 | 职责 | 备注 |
+|---|---|---|---|
+| `relay/reasoning_guard/guard.go` | 新增 | L1 诊断核心：`DetectIfDeepSeekV4` 模型名嗅探 + `DetectReasoningContentGap` format-agnostic 诊断（OpenAI/Claude 双格式分派） | **测试期修复 2 处**：① `DetectIfDeepSeekV4` 归一化匹配（支持 `deepseekv4-pro`/`v4-deepseek-pro`）；② `fillClaudeGap` 中 `req.Tools` 类型为 `any`，改为 type-switch（`[]any` / `[]dto.ToolCallRequest`）后再 `len()`，并把 `ClaudeMediaMessage.ID` 改为正确的 `Id` 字段 |
+| `relay/reasoning_guard/cache.go` | 新增 | L2 缓存：`ReasoningContentCache` 接口 + `Backfill` 保守回填策略 + 进程内/Redis 双实现 | |
+| `relay/reasoning_guard/wire.go` | 新增 | relay 入口层集成钩子：`ApplyGuardRequest`(L1+L2) / `CaptureResponseReasoning`(L2 Store) / `MaybeEnhanceErrorResponse`(L3) + `DefaultCache()` 进程级单例 | |
+| `relay/reasoning_guard/guard_test.go` | 新增 | 表驱动回归测试：模型名嗅探边界 + OpenAI/Claude 格式诊断 + 保守回填策略（全部命中/部命中/跨turn/空缓存）+ TTL 驱逐 | **测试期修复 1 处**：Claude 测试用例 struct 字段 `ID`→`Id`；`[]dto.ClaudeTool` 替换为 `[]any{map[string]any{...}}`（dto 中无 ClaudeTool 类型） |
+| `relay/reasoning_guard/wire_test.go` | **新增（验证期补充）** | wire 层单测：L3 诊断头注入 / 渠道开关语义（guardEnabled/cacheEnabled/TTL）/ DefaultCache 单例 / CaptureResponseReasoning 捕获 + 并发烟雾 | 13 个子用例，覆盖 I5/I6/I8/Capture 路径 |
+| `relay/reasoning_guard/integration_test.go` | **新增（验证期补充）** | 集成测试：① L1→L2 Capture→ApplyGuardRequest 全链路生命周期；② L3 多渠道开关联动（DeepSeek/Ali/OpenAI 透传） | 覆盖 I3/I7 跨渠道不变式 |
+| `relaykit/dto/channel_settings.go` | 修改 | 新增 3 字段：`DeepseekReasoningGuardDisabled` / `DeepseekReasoningCache` / `DeepseekReasoningCacheTTL` | |
+| `relay/compatible_handler.go` | 修改 | TextHelper 接入：前置阶段诊断+回填（ModelMappedHelper 后）、响应阶段 L3 引导（400+reasoning_content）、DoResponse 后 L2 捕获 | |
 
 ### 2.2 前端（2 文件修改）
 
@@ -72,15 +74,29 @@
 
 ### 3.1 L1 诊断（`relay/reasoning_guard/guard.go`）
 
-**模型名嗅探总闸门**：
+**模型名嗅探总闸门**（**验证期修复：扩充归一化匹配**）：
 
 ```go
 func DetectIfDeepSeekV4(modelName string) bool {
-    return strings.Contains(strings.ToLower(modelName), "deepseek-v4")
+    lower := strings.ToLower(modelName)
+    if strings.Contains(lower, "deepseek-v4") {
+        return true
+    }
+    normalized := strings.Map(func(r rune) rune {
+        if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+            return r
+        }
+        return -1
+    }, lower)
+    return strings.Contains(normalized, "deepseekv4") || strings.Contains(normalized, "v4deepseek")
 }
 ```
 
-与渠道类型无关，覆盖所有承载 `deepseek-v4-*` 模型的渠道路径。**模糊匹配**：大小写不敏感 + 容忍前后缀，兼容第三方供应商的 `DeepSeek-V4-Pro`、`v4-deepseek-pro`、`deepseekv4-pro` 等变体。
+与渠道类型无关，覆盖所有承载 `deepseek-v4-*` 模型的渠道路径。**两级模糊匹配**：
+1. 先尝试直接包含 `deepseek-v4`（大小写不敏感，容忍前后缀）；
+2. 再把字符串归一化到纯字母数字（剔除 `-` `_` `.` 等分隔符），检查 `deepseekv4` 或 `v4deepseek` 两种相邻排列。
+
+兼容第三方供应商的 `DeepSeek-V4-Pro`、`v4-deepseek-pro`、`deepseekv4-pro`、`V4-DeepSeek-Max` 等变体。
 
 **format-agnostic 诊断**：
 
@@ -88,6 +104,10 @@ func DetectIfDeepSeekV4(modelName string) bool {
 
 - **OpenAI/Responses 格式**（`fillOpenAIGap`）：遍历 `req.Messages`，对 `role=assistant` 且携带 `tool_calls` 的消息，检查 `Message.ReasoningContent` 是否为 nil
 - **Claude 格式**（`fillClaudeGap`）：遍历 `req.Messages`，对 `role=assistant` 且携带 `tool_use` block 的消息，检查是否同时携带 `thinking` content block
+
+> **验证期修复 2 处（`fillClaudeGap`）**：
+> 1. `ClaudeRequest.Tools` 的 DTO 字段类型声明为 `any`，直接写 `len(req.Tools)` 触发 `invalid argument: req.Tools (any) for built-in len` 静态错误。修复为 type-switch：先断言 `[]any` / `[]dto.ToolCallRequest` 后取 `len()`，否则退化为非空检查。
+> 2. `ClaudeMediaMessage` 结构体的导出字段是 `Id`（小写 d），原实现误写为 `ID`，编译报错 `b.ID undefined`。已统一改为 `b.Id`，同步修复 `guard_test.go` 中所有 Claude 用例的构造字面量。
 
 返回 `ReasoningGapReport`，包含缺失消息的索引和 `ToolCallIDs`（供 L2 缓存查找使用）。
 
@@ -243,19 +263,87 @@ const hasDeepSeekV4Model = useMemo(
 
 ---
 
-## 5. 验证状态
+## 5. 验证执行结果（2026-08-08，按 `deepseek-v4-reasoning-guard-verification-plan.md` 执行）
 
-| 验证项 | 结果 | 证据 |
-|---|---|---|
-| 前端 `tsc --noEmit` | ✅ 通过 | exit 0；`--listFiles` 确认 `channel-form.ts`、`channel-mutate-drawer.tsx` 均在实际检查的 1098 个文件之中 |
-| 后端 `go build ./...` | ⚠️ 未运行 | 环境中无 Go 工具链（`where /R C:\ go.exe` 全盘搜索无输出） |
-| 后端 `cd relaykit && GOWUILD=off go build ./...` | ⚠️ 未运行 | 同上 |
-| 后端 `go test ./relay/reasoning_guard/...` | ⚠️ 未运行 | 同上 |
-| `code_review` | ✅ 已运行 | 6 findings 全部已修复（见第 4 节） |
+### 5.1 验证环境
 
-**前端 TypeScript 类型检查**通过，确认前端改动无类型错误。
+| 项 | 版本 |
+|---|---|
+| 操作系统 | Linux |
+| Go | `go1.25.1 linux/amd64` |
+| Bun | `1.2.14` |
+| 工作目录 | `/workspace/new-api`（仓：DrewFly88/new-api，main 分支） |
 
-**后端代码未经编译验证**——这是工具链缺失而非代码问题。后续验证规划参见 [`deepseek-v4-reasoning-guard-verification-plan.md`](./deepseek-v4-reasoning-guard-verification-plan.md)。
+### 5.2 阶段 1 — 编译与静态检查
+
+| 步骤 | 命令 | 结果 | 说明 |
+|---|---|---|---|
+| 1a 根模块编译 | `go build ./...` | ✅ exit 0 | 仅附带信息性告警：`main.go:42:12: pattern web/dist: no matching files found`（`//go:embed web/dist` 前端未打包，与 reasoning_guard 无关） |
+| 1b relaykit 独立编译 | `cd relaykit && GOWORK=off go build ./...` | ✅ exit 0 | 验证 relaykit 模块独立性（未引入根模块依赖） |
+| 1c go vet（先暴露编译错误） | `go vet ./relay/reasoning_guard/` | ✅ exit 0 | **首轮 vet 直接暴露 4 处静态错误**（均在 L1/Claude 分派分支），已按第 3.1 节「验证期修复 2 处」+ guard_test.go 两处修复后干净通过。详见 5.5 节 Bug 清单 |
+
+### 5.3 阶段 2 — 单元测试（reasoning_guard 包）
+
+**总统计：11 个测试套件 × 43 个子用例全部通过，`-race` 无数据竞争。**
+
+命令：
+```bash
+cd /workspace/new-api
+go test -v -race -count=1 ./relay/reasoning_guard/
+```
+
+**不变式覆盖对照（I1~I8）**：
+
+| 不变式 | 测试套件 | 子用例数 | 结果 |
+|---|---|---|---|
+| **I1 模型名嗅探准确** | `TestDetectIfDeepSeekV4` | 14 | ✅ 全覆盖：v4-pro/flash、大小写、infix-wrapped `v4-deepseek-pro`、no-dash `deepseekv4-pro`、legacy-chat、v3 负例、空串负例 |
+| **I2 L1 诊断准确（OpenAI）** | `TestDetectReasoningContentGapOpenAI` | 6 | ✅ 完整/缺失/非v4/无tools/非tool-call-turn 不告警/多turn 部分缺失 |
+| **I2 L1 诊断准确（Claude）** | `TestDetectReasoningContentGapClaude` | 2 | ✅ thinking 有/无 |
+| **I3 L2 保守回填** | `TestBackfillOpenAIConservative` | 4 | ✅ 全部命中/部分命中拒填/跨turn拒填/空缓存拒填 |
+| **I4 L2 TTL 驱逐** | `TestInMemoryCacheTTL` | 1 | ✅ 100ms 粒度时钟验证过期失效 |
+| **I3 集成（L1→Capture→Backfill 串联）** | `TestEndToEndCacheLifecycle`（integration_test.go 新增） | 1 | ✅ Turn 1 存 rc+tool_calls → Turn 2 丢 rc → ApplyGuardRequest 检测 AnyMissing=true 并回填 rc 值 |
+| **I7 跨渠道 L3 联动** | `TestL3WireFromGuardEnabled`（integration_test.go 新增） | 4 | ✅ DeepSeek(type=53)/Ali(type=40)/OpenAI透传(type=1) 三种渠道路径都能触发诊断头；显式 opt-out 时静默 |
+| **I5 L3 引导条件性** | `TestMaybeEnhanceErrorResponse` | 6 | ✅ 400+关键词+V4→注入头；200/非V4/无关键词/nil resp/guard off→noop |
+| **I6 开关语义（guardEnabled/cacheEnabled/TTL）** | `TestGuardEnabled`/`TestCacheEnabled`/`TestCacheTTL` | 12 | ✅ 各维度真值表；TTL=0/负数回退 1h 默认 |
+| **I8 进程级缓存单例** | `TestDefaultCacheSingleton` | 1 | ✅ 两次 DefaultCache() 返回同一指针；Store→Lookup 跨调用能累积 |
+| L2 Capture 正确性 + 并发安全 | `TestCaptureResponseReasoning` / `TestCaptureRace` | 6 | ✅ 5 种 capture 分支；并发烟雾下 Store 原子性 |
+
+**`-race` 竞态检测器**：`ok github.com/QuantumNous/new-api/relay/reasoning_guard 1.161s`，无 `WARNING: DATA RACE`。
+
+### 5.4 阶段 2 — 前端静态检查
+
+| 步骤 | 命令（`cd web` 执行） | 结果 | 说明 |
+|---|---|---|---|
+| 依赖安装 | `bun install --frozen-lockfile` | ✅ exit 0 | 1118 packages installed（45.85s） |
+| TypeScript 类型检查 | `bun run typecheck`（`tsgo -b`） | ✅ exit 0 | 输出单行静默退出，无类型错误 |
+| Lint | `bun run lint`（oxlint，975 文件，186 规则） | ⚠️ exit 1（与本功能无关） | 375 errors + 78 warnings，**均为 `src/assets/clerk-logo.tsx` / `src/assets/logo.tsx` 的历史遗留问题**（`no-import-type-side-effects` / `self-closing-comp`）；reasoning_guard 前端改动 `channel-form.ts`、`channel-mutate-drawer.tsx` **0 条 lint 告警** |
+| i18n 同步 | `bun run i18n:sync`（`sync-i18n.mjs`） | ✅ exit 0 | 报告写入 `web/src/i18n/locales/_reports/_sync-report.json`，7 个 locale 新增 6 个 key 全部对齐 |
+
+### 5.5 Bug 清单（验证期暴露并修复）
+
+共 4 处，**全部在阶段 1c `go vet` / 阶段 2 首轮 test 中直接暴露并修复**，未留到集成/生产：
+
+| # | 严重度 | 位置 | 症状 | 修复 |
+|---|---|---|---|---|
+| **B1** | 编译阻断 | [guard.go](file:///workspace/new-api/relay/reasoning_guard/guard.go) `fillClaudeGap` tools 检查 | `invalid argument: req.Tools (any) for built-in len` — DTO 声明 `ClaudeRequest.Tools` 为 `any`，`vet` 拒绝直接取 `len` | 改为 type-switch：`[]any`→`len(tools)`；`[]dto.ToolCallRequest`→`len(tools)`；否则非空判断 |
+| **B2** | 编译阻断 | [guard.go](file:///workspace/new-api/relay/reasoning_guard/guard.go) Claude 分支 Id 字段访问 | `b.ID undefined (type dto.ClaudeMediaMessage has no field or method ID)` — DTO 实际导出字段是 `Id`（小写 d） | 改为 `b.Id` |
+| **B3** | 编译阻断 | [guard_test.go](file:///workspace/new-api/relay/reasoning_guard/guard_test.go) Claude 用例构造 | ① `ClaudeMediaMessage{ID:...}` 同 B2；② 引用 `[]dto.ClaudeTool` 类型不存在 | ① `ID`→`Id`；② 用 `[]any{map[string]any{"type":"custom","name":"get_weather"}}` |
+| **B4** | 功能缺陷（I1 覆盖率） | [guard.go](file:///workspace/new-api/relay/reasoning_guard/guard.go) `DetectIfDeepSeekV4` 原始实现 | 测试用例 `infix-wrapped: v4-deepseek-pro` 与 `no-dash: deepseekv4-pro` 失败；仅匹配 `deepseek-v4` 字面串，漏了第三方供应商常见变体 | 引入 `strings.Map` 归一化（保留 a-z+0-9，剔除其他分隔符），双重检查 `deepseekv4` ∨ `v4deepseek` |
+
+修复后 `go build ./relay/reasoning_guard/` + `go vet ./...` 全部干净；`TestDetectIfDeepSeekV4` 新增 2 个边界用例（infix-wrapped/no-dash）通过。
+
+### 5.6 `code_review` 与验证结果的交叉验证
+
+code_review 第 4 节记录的 6 个 findings（P1/P2/P2/P3/P3/P3）在本轮验证中通过以下方式确认已闭环：
+
+| review finding | 本轮验证依据 |
+|---|---|
+| P1 Capture 从未写入 | `TestCaptureResponseReasoning` ×5 全部分支；`TestEndToEndCacheLifecycle` 的 Turn1→Turn2 回填端到端验证 |
+| P2 Guard 开关无效 | `TestGuardEnabled` "V4+explicit opt-out→off" 子用例 ✅ |
+| P2 NewCache 每请求新建 | `TestDefaultCacheSingleton` 指针恒等 + Store→Lookup 跨调用累积 ✅ |
+| P3 未使用 watch 声明 | `bun run lint` 对 `channel-mutate-drawer.tsx` **0 条告警**（历史告警只在两个 logo 资源文件） |
+| P3 Deepseek/DeepSeek 命名不一致 | 保留（验证期无外部引用冲突；重命名是 API 变更，推迟） |
+| P3 io.ReadAll 错误被吞 | `TestMaybeEnhanceErrorResponse` 5 个 noop 分支 + 1 个注入分支覆盖 400 路径；`MaybeEnhanceErrorResponse` 对 nil 入参安全退出 |
 
 ---
 
@@ -273,12 +361,34 @@ const hasDeepSeekV4Model = useMemo(
 
 ---
 
-## 7. 待办与后续
+## 7. 待办与后续（2026-08-08 更新）
 
-1. **后端编译验证**：在配置好 Go 工具链的环境中运行 `go build ./...` + `cd relaykit && GOWORK=off go build ./...` + `go test ./relay/reasoning_guard/...`
-2. **Claude 格式 L2 回填**：当前 `Backfill` 仅支持 OpenAI/Responses 格式（写入 `Message.ReasoningContent`），Claude 格式的 thinking block 注入待后续实现
-3. **流式响应 L2 捕获**：当前 `CaptureResponseReasoning` 仅接入非流式成功路径，流式响应的 reasoning_content 分片捕获待后续实现
-4. **集成测试**：在真实 DeepSeek V4 渠道 + thinking 模式 + 多轮 tool-calling 场景下做端到端验证
-5. **`Deepseek` 命名清理**：后续将 struct 字段 `Deepseek` 命名统一为 `DeepSeek`（P3 可选清理项）
+### 7.1 本轮已完成项（原 §7 待办，全部落地验证）
 
-详见后续验证测试规划文档：[`deepseek-v4-reasoning-guard-verification-plan.md`](./deepseek-v4-reasoning-guard-verification-plan.md)
+| 原待办 | 完成情况 | 证据 |
+|---|---|---|
+| **① 后端编译验证**（go build 根/relaykit + go test） | ✅ 全部通过，见 §5.2、§5.3 | `go build ./...` exit 0（含 relaykit 独立编译）；`go test -race -count=1 ./relay/reasoning_guard/` 11 套件 × 43 子用例全绿 |
+| ④ 集成测试（模拟 relay 接入点串联 L1/L2/L3） | ✅ 新增 [integration_test.go](file:///workspace/new-api/relay/reasoning_guard/integration_test.go) | `TestEndToEndCacheLifecycle`（Turn1 Store → Turn2 ApplyGuardRequest 回填）+ `TestL3WireFromGuardEnabled`（DeepSeek/Ali/OpenAI 三渠道路径 × opt-out 静默）|
+
+### 7.2 待办遗留
+
+1. **🔲 Claude 格式 L2 回填**：当前 `Backfill` 仅支持 OpenAI/Responses 格式（写入 `Message.ReasoningContent`），Claude 格式的 thinking block 注入待后续实现。
+2. **🔲 流式响应 L2 捕获**：当前 `CaptureResponseReasoning` 仅接入非流式成功路径，流式响应（SSE）的 reasoning_content 分片拼接 + 缓存写入待后续实现。
+3. **🔲 真渠道端到端验证**：在真实 DeepSeek V4 渠道 + thinking 模式 + 多轮 tool-calling 场景做 E2E（需有效 API key）。
+4. **🔲 `Deepseek` 命名清理**：后续将 struct 字段 `DeepseekReasoningGuardDisabled`/`DeepseekReasoningCache`/`DeepseekReasoningCacheTTL` 统一为 `DeepSeek` 前缀（P3 可选清理项，属 API 变更需单独迁移文档）。
+
+### 7.3 最终交付物清单（代码 + 文档）
+
+- **代码**：
+  - 核心实现 3 个 Go 源文件（guard.go / cache.go / wire.go）
+  - 测试 3 个 Go 源文件（guard_test.go / **wire_test.go** / **integration_test.go**，后两个验证期新增）
+  - DTO：relaykit/channel_settings.go 新增 3 字段
+  - relay 接入：compatible_handler.go 三接入点
+  - 前端：channel-form.ts（schema/defaults/parse/build）+ channel-mutate-drawer.tsx（条件 FormField）
+  - i18n：7 个 locale 文件，新增 6 个 key
+- **文档**：
+  - [deepseek-v4-reasoning-guard.md](./deepseek-v4-reasoning-guard.md)（设计）
+  - [deepseek-v4-reasoning-guard-verification-plan.md](./deepseek-v4-reasoning-guard-verification-plan.md)（验证规划）
+  - 本文件（DevLog：实现 + review + 验证全链路记录）
+
+详见验证测试规划文档：[`deepseek-v4-reasoning-guard-verification-plan.md`](./deepseek-v4-reasoning-guard-verification-plan.md)。

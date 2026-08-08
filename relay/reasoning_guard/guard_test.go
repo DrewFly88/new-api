@@ -179,7 +179,7 @@ func TestDetectReasoningContentGapClaude(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			blocks := []dto.ClaudeMediaMessage{
-				{Type: "tool_use", ID: toolUseID, Name: "get_weather", Input: map[string]any{"city": "Paris"}},
+				{Type: "tool_use", Id: toolUseID, Name: "get_weather", Input: map[string]any{"city": "Paris"}},
 			}
 			if tc.hasThinking {
 				blocks = append([]dto.ClaudeMediaMessage{{Type: "thinking", Text: &thinkingText}}, blocks...)
@@ -187,7 +187,7 @@ func TestDetectReasoningContentGapClaude(t *testing.T) {
 			req := &dto.ClaudeRequest{
 				Model:    tc.model,
 				Messages: []dto.ClaudeMessage{{Role: "user", Content: "weather?"}, {Role: "assistant", Content: blocks}},
-				Tools:    []dto.ClaudeTool{{Type: "custom", Name: "get_weather"}},
+				Tools:    []any{map[string]any{"type": "custom", "name": "get_weather"}},
 			}
 			report := DetectReasoningContentGap(types.RelayFormatClaude, tc.model, req)
 			require.True(t, report.IsDeepSeekV4)

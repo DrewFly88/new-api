@@ -38,7 +38,22 @@ import (
 // gated further by tool-call + thinking-mode checks, so a false positive at
 // this gate only costs a no-op diagnosis scan.
 func DetectIfDeepSeekV4(modelName string) bool {
-	return strings.Contains(strings.ToLower(modelName), "deepseek-v4")
+	lower := strings.ToLower(modelName)
+	if strings.Contains(lower, "deepseek-v4") {
+		return true
+	}
+	// Tolerate supplier variants:
+	//   - dropped separators: "deepseekv4-pro", "deepseek_v4"
+	//   - infix-wrapped order: "v4-deepseek-pro", "pro-v4-deepseek"
+	// Strategy: strip non-alnum separators, then require both tokens to be
+	// present as a contiguous block in either order.
+	normalized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, lower)
+	return strings.Contains(normalized, "deepseekv4") || strings.Contains(normalized, "v4deepseek")
 }
 
 // ReasoningGapReport describes missing reasoning_content in an inbound request.
@@ -137,7 +152,13 @@ func fillClaudeGap(report *ReasoningGapReport, messages any) {
 	if !ok || req == nil {
 		return
 	}
-	report.HasTools = len(req.Tools) > 0
+	if tools, ok := req.Tools.([]any); ok {
+		report.HasTools = len(tools) > 0
+	} else if tools, ok := req.Tools.([]dto.ToolCallRequest); ok {
+		report.HasTools = len(tools) > 0
+	} else {
+		report.HasTools = req.Tools != nil
+	}
 	if !report.HasTools {
 		return
 	}
@@ -156,8 +177,8 @@ func fillClaudeGap(report *ReasoningGapReport, messages any) {
 			switch b.Type {
 			case "tool_use":
 				hasToolUse = true
-				if b.ID != "" {
-					toolUseIDs = append(toolUseIDs, b.ID)
+				if b.Id != "" {
+					toolUseIDs = append(toolUseIDs, b.Id)
 				}
 			case "thinking":
 				hasThinking = true
