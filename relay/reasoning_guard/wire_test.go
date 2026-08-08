@@ -341,3 +341,108 @@ func TestCaptureRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// ---------------------------------------------------------------------------
+// TestCaptureStreamResponseReasoning (I8 streaming L2 capture)
+// ---------------------------------------------------------------------------
+
+func TestCaptureStreamResponseReasoning(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("cache enabled + rc + ids → stores all", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, true, 0)
+		cache := newInMemoryCache()
+		CaptureStreamResponseReasoning(ctx, cache, info, "streamed-rc", []string{"s_1", "s_2"})
+		hits, err := cache.Lookup(ctx, 42, []string{"s_1", "s_2"})
+		require.NoError(t, err)
+		require.Len(t, hits, 2)
+		for _, e := range hits {
+			assert.Equal(t, "streamed-rc", e.ReasoningContent)
+			assert.Equal(t, "req-test-001", e.TurnID)
+		}
+	})
+
+	t.Run("cache enabled + empty rc → skip", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, true, 0)
+		cache := newInMemoryCache()
+		CaptureStreamResponseReasoning(ctx, cache, info, "", []string{"s_3"})
+		hits, _ := cache.Lookup(ctx, 42, []string{"s_3"})
+		assert.Empty(t, hits)
+	})
+
+	t.Run("cache enabled + no ids → skip", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, true, 0)
+		cache := newInMemoryCache()
+		CaptureStreamResponseReasoning(ctx, cache, info, "rc-but-no-ids", nil)
+		// nothing to lookup — just assert no panic / no store
+	})
+
+	t.Run("cache enabled + blank ids filtered", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, true, 0)
+		cache := newInMemoryCache()
+		CaptureStreamResponseReasoning(ctx, cache, info, "rc", []string{"", "s_4", ""})
+		hits, _ := cache.Lookup(ctx, 42, []string{"s_4"})
+		require.Len(t, hits, 1, "only the non-blank id should be stored")
+	})
+
+	t.Run("cache disabled → skip", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, false, 0)
+		cache := newInMemoryCache()
+		CaptureStreamResponseReasoning(ctx, cache, info, "rc", []string{"s_5"})
+		hits, _ := cache.Lookup(ctx, 42, []string{"s_5"})
+		assert.Empty(t, hits)
+	})
+
+	t.Run("nil cache → skip (no panic)", func(t *testing.T) {
+		info := buildRelayInfo(t, "deepseek-v4-pro", false, true, 0)
+		CaptureStreamResponseReasoning(ctx, nil, info, "rc", []string{"s_6"})
+	})
+}
+
+// ---------------------------------------------------------------------------
+// TestCollectStreamReasoning (per-chunk parse helper)
+// ---------------------------------------------------------------------------
+
+func TestCollectStreamReasoning(t *testing.T) {
+	// A chunk with reasoning_content fragment + a tool_call id.
+	chunkWithBoth := []byte(`{"choices":[{"delta":{"reasoning_content":"think-frag","tool_calls":[{"id":"call_chunk_1","type":"function","function":{"name":"f"}}]}}]}`)
+
+	t.Run("parses reasoning fragment + tool id", func(t *testing.T) {
+		frag, ids := CollectStreamReasoning(chunkWithBoth)
+		assert.Equal(t, "think-frag", frag)
+		require.Len(t, ids, 1)
+		assert.Equal(t, "call_chunk_1", ids[0])
+	})
+
+	t.Run("no reasoning + no tool_calls → zero values", func(t *testing.T) {
+		frag, ids := CollectStreamReasoning([]byte(`{"choices":[{"delta":{"content":"hi"}}]}`))
+		assert.Empty(t, frag)
+		assert.Empty(t, ids)
+	})
+
+	t.Run("multiple choices accumulate", func(t *testing.T) {
+		chunk := []byte(`{"choices":[{"delta":{"reasoning_content":"a","tool_calls":[{"id":"id_a"}]}},{"delta":{"reasoning_content":"b","tool_calls":[{"id":"id_b"}]}}]}`)
+		frag, ids := CollectStreamReasoning(chunk)
+		assert.Equal(t, "ab", frag)
+		require.Len(t, ids, 2)
+	})
+
+	t.Run("blank tool id omitted", func(t *testing.T) {
+		chunk := []byte(`{"choices":[{"delta":{"tool_calls":[{"id":""},{"id":"keep"}]}}]}`)
+		_, ids := CollectStreamReasoning(chunk)
+		require.Len(t, ids, 1)
+		assert.Equal(t, "keep", ids[0])
+	})
+
+	t.Run("invalid JSON → zero values, no panic", func(t *testing.T) {
+		frag, ids := CollectStreamReasoning([]byte("not-json"))
+		assert.Empty(t, frag)
+		assert.Empty(t, ids)
+	})
+
+	t.Run("empty chunk → zero values", func(t *testing.T) {
+		frag, ids := CollectStreamReasoning(nil)
+		assert.Empty(t, frag)
+		assert.Empty(t, ids)
+	})
+}

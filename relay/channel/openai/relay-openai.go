@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
+	reasoning_guard "github.com/QuantumNous/new-api/relay/reasoning_guard"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -122,6 +123,15 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
 
+	// DeepSeek V4 reasoning_content guard L2: accumulate reasoning fragments
+	// and tool_call ids across stream chunks, backfill once the stream ends.
+	// Gate computed ONCE before the loop so non-DeepSeek streaming traffic
+	// does not pay an extra per-chunk JSON parse (CollectStreamReasoning).
+	guardStreamActive := reasoning_guard.StreamGuardActive(info)
+	var guardReasoningBuilder strings.Builder
+	var guardToolCallIDs []string
+	guardSeenToolIDs := make(map[string]struct{})
+
 	// 检查是否为音频模型
 	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
 
@@ -133,6 +143,21 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 		}
 		if len(data) > 0 {
+			// DeepSeek V4 reasoning_content guard L2: parse this chunk's
+			// reasoning_content fragment + tool_call ids for later capture.
+			// Skipped entirely for non-deepseek-v4-* / cache-disabled channels.
+			if guardStreamActive {
+				if frag, ids := reasoning_guard.CollectStreamReasoning([]byte(data)); frag != "" || len(ids) > 0 {
+					guardReasoningBuilder.WriteString(frag)
+					for _, id := range ids {
+						if _, seen := guardSeenToolIDs[id]; !seen {
+							guardSeenToolIDs[id] = struct{}{}
+							guardToolCallIDs = append(guardToolCallIDs, id)
+						}
+					}
+				}
+			}
+
 			// 对音频模型，保存倒数第二个stream data
 			if isAudioModel && lastStreamData != "" {
 				secondLastStreamData = lastStreamData
@@ -190,6 +215,12 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+
+	// DeepSeek V4 reasoning_content guard L2 capture: store the accumulated
+	// reasoning_content fragments + deduplicated tool_call ids from this
+	// streaming turn, so a later turn can conservatively backfill. No-op for
+	// non-deepseek-v4-* models or when cache is disabled.
+	reasoning_guard.CaptureStreamResponseReasoning(c.Request.Context(), reasoning_guard.DefaultCache(), info, guardReasoningBuilder.String(), guardToolCallIDs)
 
 	return usage, nil
 }

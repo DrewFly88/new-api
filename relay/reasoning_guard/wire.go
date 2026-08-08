@@ -175,3 +175,87 @@ func MaybeEnhanceErrorResponse(info *relaycommon.RelayInfo, httpResp *http.Respo
 	httpResp.Header.Set("X-Newapi-Reasoning-Guard", "missing-reasoning-content")
 	return true
 }
+
+// CaptureStreamResponseReasoning is the streaming-response counterpart of
+// CaptureResponseReasoning. It runs L2 capture for SSE-delivered responses
+// where reasoning_content arrives in fragments across multiple chunks and
+// tool_call ids may be split across chunks too.
+//
+// The caller (stream handler) is responsible for accumulating two slices
+// during the stream scan and passing them here once the stream completes:
+//   - reasoningContent: the concatenated reasoning_content fragments (already
+//     merged by the handler in arrival order).
+//   - toolCallIDs: the deduplicated, non-empty tool_call ids seen across all
+//     chunks of this assistant turn.
+//
+// This split design keeps the guard out of the hot streaming loop — the
+// handler accumulates with its existing scanner, then calls us once at the
+// end, avoiding per-chunk cache writes and locking contention.
+//
+// No-op when channel cache is disabled, model is not DeepSeek-V4, or both
+// inputs are empty. Store errors are logged via common.SysError and do not
+// abort the caller's flow.
+func CaptureStreamResponseReasoning(ctx context.Context, cache ReasoningContentCache, info *relaycommon.RelayInfo, reasoningContent string, toolCallIDs []string) {
+	if !cacheEnabled(info) || cache == nil {
+		return
+	}
+	if reasoningContent == "" || len(toolCallIDs) == 0 {
+		return
+	}
+	channelID := info.GetChannelID()
+	ttl := cacheTTL(info)
+	turnID := info.RequestId
+	for _, id := range toolCallIDs {
+		if id == "" {
+			continue
+		}
+		if err := cache.Store(ctx, channelID, id, reasoningContent, turnID, ttl); err != nil {
+			newapicommon.SysError(fmt.Sprintf("reasoning_guard stream cache store error: %v", err))
+		}
+	}
+}
+
+// CollectStreamReasoning is a per-chunk helper for stream handlers. It parses
+// one SSE chunk's reasoning_content fragment and tool_call ids, returning them
+// so the handler can accumulate across chunks. Empty results are returned as
+// zero values so the caller can skip no-op chunks.
+//
+// This is intentionally a pure parse helper — no cache I/O — so it can be
+// called inside the hot streaming loop without lock contention. The handler
+// merges the returned fragments in arrival order and feeds the final
+// concatenation to CaptureStreamResponseReasoning once the stream ends.
+//
+// Callers SHOULD gate this on StreamGuardActive(info) computed once before the
+// stream loop, so non-DeepSeek streaming traffic does not incur an extra
+// per-chunk JSON parse.
+func CollectStreamReasoning(chunk []byte) (reasoningFragment string, toolCallIDs []string) {
+	var streamResp dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(string(chunk), &streamResp); err != nil {
+		return "", nil
+	}
+	for _, choice := range streamResp.Choices {
+		if frag := choice.Delta.GetReasoningContent(); frag != "" {
+			reasoningFragment += frag
+		}
+		for _, tc := range choice.Delta.ToolCalls {
+			if tc.ID != "" {
+				toolCallIDs = append(toolCallIDs, tc.ID)
+			}
+		}
+	}
+	return reasoningFragment, toolCallIDs
+}
+
+// StreamGuardActive reports whether the L2 streaming guard should accumulate
+// per-chunk reasoning fragments for this request. Stream handlers SHOULD call
+// this ONCE before the stream loop and skip CollectStreamReasoning entirely
+// when it returns false, so non-DeepSeek streaming traffic does not pay an
+// extra per-chunk JSON parse on the hot path.
+//
+// This is the streaming counterpart of the cacheEnabled predicate: it also
+// requires the guard itself to be on (guardEnabled), since accumulating
+// fragments when the guard is off would be wasted work feeding a no-op
+// CaptureStreamResponseReasoning.
+func StreamGuardActive(info *relaycommon.RelayInfo) bool {
+	return cacheEnabled(info)
+}

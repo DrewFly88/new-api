@@ -300,3 +300,102 @@ func TestInMemoryCacheTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, hits, "entry should be evicted after TTL expires")
 }
+
+// TestBackfillClaudeConservative covers L2 conservative backfill for Claude
+// format: a thinking block must be injected at the HEAD of the assistant
+// message's content array only on a full same-turn hit; partial/cross-turn/
+// empty-cache must not mutate.
+func TestBackfillClaudeConservative(t *testing.T) {
+	toolUseBlocks := func(ids ...string) []dto.ClaudeMediaMessage {
+		out := make([]dto.ClaudeMediaMessage, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, dto.ClaudeMediaMessage{Type: "tool_use", Id: id, Name: "f", Input: map[string]any{"x": 1}})
+		}
+		return out
+	}
+	mkReq := func() *dto.ClaudeRequest {
+		return &dto.ClaudeRequest{
+			Model: "deepseek-v4-pro",
+			Tools: []any{map[string]any{"type": "custom", "name": "f"}},
+			Messages: []dto.ClaudeMessage{
+				{Role: "user", Content: "q"},
+				{Role: "assistant", Content: toolUseBlocks("toolu_1", "toolu_2")},
+			},
+		}
+	}
+	// locate the assistant message's first block (the injected thinking block)
+	// and return its text; returns "" if no thinking block present.
+	firstThinkingText := func(req *dto.ClaudeRequest) string {
+		blocks, ok := req.Messages[1].Content.([]dto.ClaudeMediaMessage)
+		if !ok || len(blocks) == 0 {
+			return ""
+		}
+		if blocks[0].Type != "thinking" || blocks[0].Text == nil {
+			return ""
+		}
+		return *blocks[0].Text
+	}
+	// count tool_use blocks remaining after backfill (verifies no blocks dropped)
+	toolUseCount := func(req *dto.ClaudeRequest) int {
+		blocks, ok := req.Messages[1].Content.([]dto.ClaudeMediaMessage)
+		if !ok {
+			return -1
+		}
+		n := 0
+		for _, b := range blocks {
+			if b.Type == "tool_use" {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("full hit same turn → inject thinking block at head", func(t *testing.T) {
+		cache := newInMemoryCache()
+		ctx := context.Background()
+		require.NoError(t, cache.Store(ctx, 1, "toolu_1", "rc1", "turnA", time.Hour))
+		require.NoError(t, cache.Store(ctx, 1, "toolu_2", "rc2", "turnA", time.Hour))
+
+		req := mkReq()
+		report := DetectReasoningContentGap(types.RelayFormatClaude, req.Model, req)
+		require.True(t, report.AnyMissing)
+		require.NoError(t, Backfill(ctx, cache, report, 1, req))
+		require.NotEmpty(t, firstThinkingText(req), "thinking block should be injected at head")
+		require.Equal(t, 2, toolUseCount(req), "both tool_use blocks must remain")
+	})
+
+	t.Run("partial hit → no mutation", func(t *testing.T) {
+		cache := newInMemoryCache()
+		ctx := context.Background()
+		require.NoError(t, cache.Store(ctx, 1, "toolu_1", "rc1", "turnA", time.Hour))
+		// toolu_2 NOT cached
+
+		req := mkReq()
+		report := DetectReasoningContentGap(types.RelayFormatClaude, req.Model, req)
+		require.NoError(t, Backfill(ctx, cache, report, 1, req))
+		require.Empty(t, firstThinkingText(req), "partial hit must not backfill")
+		require.Equal(t, 2, toolUseCount(req), "content blocks must be untouched")
+	})
+
+	t.Run("cross-turn hit → no mutation", func(t *testing.T) {
+		cache := newInMemoryCache()
+		ctx := context.Background()
+		require.NoError(t, cache.Store(ctx, 1, "toolu_1", "rc1", "turnA", time.Hour))
+		require.NoError(t, cache.Store(ctx, 1, "toolu_2", "rc2", "turnB", time.Hour))
+
+		req := mkReq()
+		report := DetectReasoningContentGap(types.RelayFormatClaude, req.Model, req)
+		require.NoError(t, Backfill(ctx, cache, report, 1, req))
+		require.Empty(t, firstThinkingText(req), "cross-turn hit must not backfill")
+	})
+
+	t.Run("empty cache → no mutation", func(t *testing.T) {
+		cache := newInMemoryCache()
+		ctx := context.Background()
+		req := mkReq()
+		report := DetectReasoningContentGap(types.RelayFormatClaude, req.Model, req)
+		require.NoError(t, Backfill(ctx, cache, report, 1, req))
+		require.Empty(t, firstThinkingText(req), "empty cache must not backfill")
+		require.Equal(t, 2, toolUseCount(req), "content blocks must be untouched")
+	})
+}

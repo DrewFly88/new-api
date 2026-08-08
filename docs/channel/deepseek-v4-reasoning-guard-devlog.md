@@ -372,8 +372,8 @@ code_review 第 4 节记录的 6 个 findings（P1/P2/P2/P3/P3/P3）在本轮验
 
 ### 7.2 待办遗留
 
-1. **🔲 Claude 格式 L2 回填**：当前 `Backfill` 仅支持 OpenAI/Responses 格式（写入 `Message.ReasoningContent`），Claude 格式的 thinking block 注入待后续实现。
-2. **🔲 流式响应 L2 捕获**：当前 `CaptureResponseReasoning` 仅接入非流式成功路径，流式响应（SSE）的 reasoning_content 分片拼接 + 缓存写入待后续实现。
+1. **✅ Claude 格式 L2 回填**（2026-08-08 完成）：`Backfill` 已新增 `backfillClaude` 分支，在保守命中（全部 tool_use id 命中 + 同 turn + 未过期）时把 thinking content block 注入到 assistant message 的 content 数组头部（在 tool_use blocks 之前）。已加空 `ToolCallIDs` 守卫防止注入空 thinking block（code_review P2 修复）。测试见 `guard_test.go::TestBackfillClaudeConservative`（4 子用例：全部命中/部命中/跨turn/空缓存）。
+2. **✅ 流式响应 L2 捕获**（2026-08-08 完成）：`wire.go` 新增 `CaptureStreamResponseReasoning`（流结束后一次性 Store）+ `CollectStreamReasoning`（每分片解析累加）+ `StreamGuardActive`（循环外门谓词）。`OaiStreamHandler` 在 `StreamScannerHandler` 回调中累加分片（reasoning_content 拼接 + tool_call_id 去重），流结束后调用 `CaptureStreamResponseReasoning`。门用 `StreamGuardActive` 提到循环外，非 DeepSeek 流式流量不付额外 JSON 解析代价（code_review P3 修复）。测试见 `wire_test.go::TestCaptureStreamResponseReasoning`（6 子用例）+ `TestCollectStreamReasoning`（6 子用例）。
 3. **🔲 真渠道端到端验证**：在真实 DeepSeek V4 渠道 + thinking 模式 + 多轮 tool-calling 场景做 E2E（需有效 API key）。
 4. **🔲 `Deepseek` 命名清理**：后续将 struct 字段 `DeepseekReasoningGuardDisabled`/`DeepseekReasoningCache`/`DeepseekReasoningCacheTTL` 统一为 `DeepSeek` 前缀（P3 可选清理项，属 API 变更需单独迁移文档）。
 

@@ -59,11 +59,8 @@ func NewCache() ReasoningContentCache {
 // request only when every tool_call_id of a missing message has a same-turn
 // cache hit; otherwise it leaves the request untouched and returns nil.
 //
-// Currently supports OpenAI/Responses format (writes Message.ReasoningContent).
-// Claude-format backfill is a no-op here; the shared-front design means Claude
-// thinking-block injection is handled by the same format dispatch in the
-// future, but for now we conservatively skip it rather than risk an incorrect
-// mutation.
+// Currently supports OpenAI/Responses format (writes Message.ReasoningContent)
+// and Claude format (injects a thinking content block ahead of tool_use blocks).
 func Backfill(ctx context.Context, cache ReasoningContentCache, report ReasoningGapReport, channelID int, messages any) error {
 	if cache == nil || !report.AnyMissing || len(report.MissingMessages) == 0 {
 		return nil
@@ -71,6 +68,8 @@ func Backfill(ctx context.Context, cache ReasoningContentCache, report Reasoning
 	switch report.RelayFormat {
 	case types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses:
 		return backfillOpenAI(ctx, cache, report, channelID, messages)
+	case types.RelayFormatClaude:
+		return backfillClaude(ctx, cache, report, channelID, messages)
 	default:
 		return nil
 	}
@@ -83,6 +82,14 @@ func backfillOpenAI(ctx context.Context, cache ReasoningContentCache, report Rea
 	}
 	for _, miss := range report.MissingMessages {
 		if miss.MessageIndex < 0 || miss.MessageIndex >= len(req.Messages) {
+			continue
+		}
+		// Guard against empty ToolCallIDs: a tool_use block without an Id
+		// yields MissingReasoningMessage{ToolCallIDs: nil}. Without this
+		// check the lookup-hits==ids gate below passes (0==0), the turn loop
+		// iterates nothing, and we'd inject a thinking block with empty Text
+		// — violating the conservative "leave untouched" contract.
+		if len(miss.ToolCallIDs) == 0 {
 			continue
 		}
 		hits, err := cache.Lookup(ctx, channelID, miss.ToolCallIDs)
@@ -120,6 +127,82 @@ func backfillOpenAI(ctx context.Context, cache ReasoningContentCache, report Rea
 		}
 		msg := &req.Messages[miss.MessageIndex]
 		msg.ReasoningContent = &rc
+	}
+	return nil
+}
+
+// backfillClaude is the Claude-format counterpart of backfillOpenAI.
+//
+// On a conservative hit (every tool_use id hit, same turn, unexpired) it
+// injects a thinking content block at the HEAD of the assistant message's
+// content array, ahead of any tool_use blocks. DeepSeek V4's Claude-format
+// API expects thinking blocks to appear before tool_use in the same assistant
+// turn, matching the order DeepSeek's own responses emit them.
+//
+// The injected block uses Type="thinking" with Text set to the cached
+// reasoning_content. We do NOT set the Signature field — DeepSeek V4 does not
+// require a thinking signature for tool-calling backfill, and fabricating one
+// would risk upstream rejection.
+func backfillClaude(ctx context.Context, cache ReasoningContentCache, report ReasoningGapReport, channelID int, messages any) error {
+	req, ok := messages.(*dto.ClaudeRequest)
+	if !ok || req == nil {
+		return nil
+	}
+	for _, miss := range report.MissingMessages {
+		if miss.MessageIndex < 0 || miss.MessageIndex >= len(req.Messages) {
+			continue
+		}
+		// Guard against empty ToolCallIDs (see backfillOpenAI for rationale):
+		// a tool_use block without an Id yields MissingReasoningMessage{ToolCallIDs: nil};
+		// without this check we'd inject a thinking block with empty Text.
+		if len(miss.ToolCallIDs) == 0 {
+			continue
+		}
+		hits, err := cache.Lookup(ctx, channelID, miss.ToolCallIDs)
+		if err != nil {
+			common.SysError(fmt.Sprintf("reasoning_guard cache lookup error (claude): %v", err))
+			continue
+		}
+		if len(hits) != len(miss.ToolCallIDs) {
+			continue // partial or no hit → do not backfill
+		}
+		// All hits must share the same non-empty TurnID.
+		turn := ""
+		okTurn := true
+		for _, e := range hits {
+			if e.TurnID == "" {
+				okTurn = false
+				break
+			}
+			if turn == "" {
+				turn = e.TurnID
+			} else if e.TurnID != turn {
+				okTurn = false
+				break
+			}
+		}
+		if !okTurn {
+			continue
+		}
+		// Pick any hit's reasoning content (they share a turn).
+		var rc string
+		for _, e := range hits {
+			rc = e.ReasoningContent
+			break
+		}
+		msg := &req.Messages[miss.MessageIndex]
+		blocks, ok := msg.Content.([]dto.ClaudeMediaMessage)
+		if !ok {
+			// Content is in an unexpected shape (e.g. plain string). Conservative:
+			// do not mutate unknown content types — let upstream 400 flow and L3 guide.
+			continue
+		}
+		// Inject thinking block at the head, ahead of tool_use blocks.
+		thinkingBlock := dto.ClaudeMediaMessage{
+			Type: "thinking",
+			Text: &rc,
+		}
+		msg.Content = append([]dto.ClaudeMediaMessage{thinkingBlock}, blocks...)
 	}
 	return nil
 }
