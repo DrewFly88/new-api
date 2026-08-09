@@ -122,6 +122,7 @@
         "deb"
       ],
       "category": "Development",
+      "maintainer": "DrewFly <DrewFly@users.noreply.github.com>",
       "extraResources": [
         {
           "from": "../new-api",
