@@ -3,7 +3,7 @@
 - 日期：2026-08-16
 - 分支：`main`
 - 目标：验证「本地 7 个开发提交 rebase 到上游 34 个提交之上」后的代码完整性，确认后方可推送至自有仓库。
-- 验证环境：云端 Go 环境（本机不执行构建，仅做文件级检查）。
+- 验证环境：云端 Go + bun 环境（2026-08-16 实际执行全部构建与测试，非仅文件级检查）。
 
 ## 1. 背景与变更范围
 
@@ -157,3 +157,24 @@ git push drewfly main
 ```
 
 > 注意：`origin`（上游 QuantumNous/new-api）**不推送**，仅保留 fetch 同步关系。
+
+## 5. 验证执行结果（2026-08-16）
+
+实际在云端沙箱（Go 1.22+、bun 1.2.14）执行全部检查项，均通过。
+
+| 检查项 | 实际命令 | 结果 |
+|---|---|---|
+| A. Git 状态 | `git status` / `git rev-list --count origin/main..HEAD` | ✅ 干净，main 分支，ahead 7 / behind 0，无冲突标记 |
+| B. 根模块构建 | `GOWORK=off go build ./...` | ✅ 退出码 0，无输出 |
+| B. 根模块 vet | `GOWORK=off go vet ./...` | ✅ 退出码 0，无输出 |
+| C. relaykit 独立 build | `cd relaykit && GOWORK=off go build ./...` | ✅ 退出码 0，无输出 |
+| C. relaykit 独立 test | `cd relaykit && GOWORK=off go test ./...` | ✅ 全部 PASS |
+| D. reasoning_guard 测试 | `GOWORK=off go test ./relay/reasoning_guard/... -v` | ✅ 全部 PASS（guard / wire / integration 完整套件，含竞态测试） |
+| D. 计费回归测试 | `GOWORK=off go test ./pkg/billingexpr/... ./common/...` | ✅ 全部 PASS |
+| E. 前端依赖 | `cd web && bun install --frozen-lockfile` | ✅ 1200 packages 安装成功 |
+| E. typecheck | `bun run typecheck`（tsgo -b） | ✅ 退出码 0，无类型错误 |
+| E. 前端测试 | `bun run test`（Vitest） | ✅ 31 文件 / 156 测试全部通过 |
+| E. i18n 一致性 | `bun run i18n:sync` + `git status --short` | ✅ 完成后工作区干净，无意外改动 |
+| F. 关键文件 | `ls relay/reasoning_guard/` / `ls relaykit/go.mod` / `head -3 go.mod` | ✅ 6 文件齐全，relaykit 独立模块存在，module 为 `github.com/QuantumNous/new-api` |
+
+**结论**：所有检查项符合预期，本地 7 个开发提交已正确重放至上游 `e2c7aa7b` 之上，代码完整、可构建、可测试，具备推送条件。
