@@ -4124,7 +4124,7 @@ export function ChannelMutateDrawer({
                                       </FormLabel>
                                       <FormDescription>
                                         {t(
-                                          'Convert reasoning_content to ⇪ tag in content'
+                                          'Convert reasoning_content to <think> tag in content'
                                         )}
                                       </FormDescription>
                                     </div>
