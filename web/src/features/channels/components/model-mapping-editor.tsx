@@ -16,8 +16,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Code, Plus, Table, Trash2 } from 'lucide-react'
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ChevronsUpDown,
+  Code,
+  Plus,
+  Table,
+  Trash2,
+} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { JsonCodeEditor } from '@/components/json-code-editor'
@@ -25,13 +34,319 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { cn } from '@/lib/utils'
+
+export type ModelMappingOptionGroup = {
+  label: string
+  /** Direct model items of this group. */
+  items?: string[]
+  /** Nested sub-groups. Every group level is collapsible. */
+  groups?: ModelMappingOptionGroup[]
+  /** Collapsed on first open when true. */
+  defaultCollapsed?: boolean
+}
+
+const GROUP_PATH_SEPARATOR = '\u0000'
+
+type GroupedComboboxInputProps = {
+  groups: ModelMappingOptionGroup[]
+  value: string
+  onValueChange: (value: string) => void
+  placeholder?: string
+  disabled?: boolean
+  ariaLabel?: string
+}
+
+/**
+ * A free-text input combined with grouped (and nested) suggestions.
+ * Supports typing a custom value not present in any group.
+ * All group levels are collapsible; searching force-expands them.
+ */
+function GroupedComboboxInput({
+  groups,
+  value,
+  onValueChange,
+  placeholder,
+  disabled,
+  ariaLabel,
+}: GroupedComboboxInputProps) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [highlightedIndex, setHighlightedIndex] = useState(-1)
+  // Per-group-path collapse overrides; falls back to defaultCollapsed.
+  const [userCollapsed, setUserCollapsed] = useState<Record<string, boolean>>(
+    {}
+  )
+  const containerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const normalizedQuery = query.trim().toLowerCase()
+
+  const isExpanded = (
+    path: string,
+    group: ModelMappingOptionGroup
+  ): boolean => {
+    // Searching force-expands every group so matches stay visible.
+    if (normalizedQuery) return true
+    return userCollapsed[path] ?? !group.defaultCollapsed
+  }
+
+  const toggleGroup = (path: string, expanded: boolean) => {
+    setUserCollapsed((previous) => ({
+      ...previous,
+      [path]: !expanded,
+    }))
+  }
+
+  const filterItems = (items: string[] | undefined): string[] => {
+    if (!items) return []
+    if (!normalizedQuery) return items
+    return items.filter((item) =>
+      item.toLowerCase().includes(normalizedQuery)
+    )
+  }
+
+  // Walk the group tree: build visible rendered nodes and the flat list of
+  // visible items (DOM order) used for keyboard navigation. Items inside a
+  // collapsed group (or a collapsed ancestor) are excluded from both.
+  const { renderedNodes, flatItems } = useMemo(() => {
+    const flat: string[] = []
+
+    const subtreeCount = (group: ModelMappingOptionGroup): number =>
+      filterItems(group.items).length +
+      (group.groups ?? []).reduce(
+        (sum, sub) => sum + subtreeCount(sub),
+        0
+      )
+
+    const build = (
+      groupList: ModelMappingOptionGroup[],
+      parentPath: string,
+      depth: number
+    ): React.ReactNode[] => {
+      const nodes: React.ReactNode[] = []
+      for (const group of groupList) {
+        const path = parentPath
+          ? `${parentPath}${GROUP_PATH_SEPARATOR}${group.label}`
+          : group.label
+        const items = filterItems(group.items)
+        const subNodes = build(group.groups ?? [], path, depth + 1)
+        if (items.length === 0 && subNodes.length === 0) continue
+
+        const expanded = isExpanded(path, group)
+        nodes.push(
+          <li
+            key={`grp-${path}`}
+            role='presentation'
+            data-group-label
+            style={{ paddingLeft: 6 + depth * 12 }}
+            className='text-muted-foreground hover:bg-accent/50 flex cursor-pointer items-center gap-1 rounded-sm py-1 pr-2 text-xs font-medium select-none'
+            onMouseDown={(event) => {
+              event.preventDefault()
+              toggleGroup(path, expanded)
+            }}
+          >
+            {expanded ? (
+              <ChevronDown className='size-3.5 shrink-0' aria-hidden='true' />
+            ) : (
+              <ChevronRight className='size-3.5 shrink-0' aria-hidden='true' />
+            )}
+            <span className='truncate'>{group.label}</span>
+            <span className='font-normal opacity-60'>
+              ({subtreeCount(group)})
+            </span>
+          </li>
+        )
+        if (!expanded) continue
+
+        for (const item of items) {
+          const index = flat.length
+          flat.push(item)
+          const isSelected = value === item
+          nodes.push(
+            <li
+              key={`item-${path}-${item}`}
+              role='option'
+              aria-selected={isSelected}
+              data-item-index={index}
+              data-highlighted={index === highlightedIndex}
+              style={{ paddingLeft: 20 + depth * 12 }}
+              className={cn(
+                'hover:bg-accent/50 relative flex cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 text-sm select-none',
+                index === highlightedIndex &&
+                  'bg-accent text-accent-foreground',
+                isSelected && 'font-medium'
+              )}
+              onMouseEnter={() => setHighlightedIndex(index)}
+              onMouseDown={(event) => {
+                event.preventDefault()
+                commit(item)
+              }}
+            >
+              <Check
+                className={cn(
+                  'size-4 shrink-0',
+                  isSelected ? 'opacity-100' : 'opacity-0'
+                )}
+              />
+              <span className='truncate'>{item}</span>
+            </li>
+          )
+        }
+        nodes.push(...subNodes)
+      }
+      return nodes
+    }
+
+    return { renderedNodes: build(groups, '', 0), flatItems: flat }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups, normalizedQuery, userCollapsed, value, highlightedIndex])
+
+  const totalItems = flatItems.length
+
+  // Close the dropdown on outside click
+  useEffect(() => {
+    if (!open) return
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(event.target as Node)
+      ) {
+        setOpen(false)
+        setQuery('')
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [open])
+
+  useEffect(() => {
+    setHighlightedIndex(-1)
+  }, [query, groups, userCollapsed])
+
+  const commit = (nextValue: string) => {
+    onValueChange(nextValue)
+    setOpen(false)
+    setQuery('')
+    inputRef.current?.focus()
+  }
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      setOpen(true)
+      return
+    }
+    if (!open) return
+
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault()
+        setHighlightedIndex((prev) =>
+          prev < totalItems - 1 ? prev + 1 : 0
+        )
+        break
+      case 'ArrowUp':
+        event.preventDefault()
+        setHighlightedIndex((prev) =>
+          prev > 0 ? prev - 1 : totalItems - 1
+        )
+        break
+      case 'Enter':
+        event.preventDefault()
+        if (highlightedIndex >= 0 && flatItems[highlightedIndex] !== undefined) {
+          commit(flatItems[highlightedIndex])
+        } else {
+          // Free-text input is already synced on change; just close.
+          setOpen(false)
+          setQuery('')
+        }
+        break
+      case 'Escape':
+        event.preventDefault()
+        setOpen(false)
+        setQuery('')
+        break
+    }
+  }
+
+  // Keep the highlighted item visible in the list
+  useEffect(() => {
+    if (highlightedIndex < 0) return
+    const items = [
+      ...(containerRef.current?.querySelectorAll<HTMLElement>(
+        '[data-item-index]'
+      ) ?? []),
+    ]
+    items[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [highlightedIndex, renderedNodes])
+
+  const showDropdown = open && (totalItems > 0 || Boolean(query.trim()))
+
+  return (
+    <div ref={containerRef} className='relative'>
+      <Input
+        ref={inputRef}
+        type='text'
+        role='combobox'
+        aria-expanded={open}
+        aria-haspopup='listbox'
+        aria-autocomplete='list'
+        aria-label={ariaLabel}
+        autoComplete='off'
+        placeholder={placeholder}
+        value={open ? query : value}
+        disabled={disabled}
+        onChange={(event) => {
+          const nextValue = event.target.value
+          setQuery(nextValue)
+          onValueChange(nextValue)
+          if (!open) setOpen(true)
+        }}
+        onFocus={() => {
+          setQuery(value)
+          setOpen(true)
+        }}
+        onKeyDown={handleKeyDown}
+        className='pr-9'
+      />
+      <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
+
+      {showDropdown && (
+        <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 w-full rounded-md border shadow-md'>
+          {totalItems > 0 ? (
+            <ul
+              role='listbox'
+              className='max-h-[240px] overflow-y-auto p-1'
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              {renderedNodes}
+            </ul>
+          ) : (
+            <div className='px-2 py-6 text-center text-sm'>
+              {t('No matching models found.')}
+              {query.trim() && (
+                <div className='text-muted-foreground mt-1 text-xs'>
+                  {t('Press Enter to use "{{value}}"', {
+                    value: query.trim(),
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 type ModelMappingEditorProps = {
   value: string
   onChange: (value: string) => void
   disabled?: boolean
-  sourceModelOptions?: string[]
-  targetModelOptions?: string[]
+  sourceModelGroups?: ModelMappingOptionGroup[]
+  targetModelGroups?: ModelMappingOptionGroup[]
 }
 
 type MappingRow = {
@@ -61,14 +376,22 @@ function getDuplicateSources(rows: MappingRow[]): string[] {
 
 export function ModelMappingEditor(props: ModelMappingEditorProps) {
   const { t } = useTranslation()
-  const sourceListId = useId()
-  const targetListId = useId()
   const [mode, setMode] = useState<'visual' | 'json'>('visual')
   const [rows, setRows] = useState<MappingRow[]>([])
   const [jsonValue, setJsonValue] = useState(props.value)
   const [jsonError, setJsonError] = useState<string | null>(null)
   const nextRowIdRef = useRef(0)
   const duplicateSources = useMemo(() => getDuplicateSources(rows), [rows])
+
+  const sourceGroups = useMemo<ModelMappingOptionGroup[]>(
+    () => props.sourceModelGroups ?? [],
+    [props.sourceModelGroups]
+  )
+
+  const targetGroups = useMemo<ModelMappingOptionGroup[]>(
+    () => props.targetModelGroups ?? [],
+    [props.targetModelGroups]
+  )
 
   const createRowId = () => {
     nextRowIdRef.current += 1
@@ -274,23 +597,25 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
                   key={row.id}
                   className='grid grid-cols-[1fr_1fr_auto] gap-2'
                 >
-                  <Input
+                  <GroupedComboboxInput
+                    groups={sourceGroups}
                     value={row.from}
-                    onChange={(e) =>
-                      handleRowChange(row.id, 'from', e.target.value)
+                    onValueChange={(nextValue) =>
+                      handleRowChange(row.id, 'from', nextValue)
                     }
                     placeholder='gpt-3.5-turbo'
                     disabled={props.disabled}
-                    list={sourceListId}
+                    ariaLabel={t('Original Model')}
                   />
-                  <Input
+                  <GroupedComboboxInput
+                    groups={targetGroups}
                     value={row.to}
-                    onChange={(e) =>
-                      handleRowChange(row.id, 'to', e.target.value)
+                    onValueChange={(nextValue) =>
+                      handleRowChange(row.id, 'to', nextValue)
                     }
                     placeholder='gpt-3.5-turbo-0125'
                     disabled={props.disabled}
-                    list={targetListId}
+                    ariaLabel={t('Replacement Model')}
                   />
                   <Button
                     type='button'
@@ -337,21 +662,6 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
           />
         </TabsContent>
       </Tabs>
-
-      {props.sourceModelOptions && props.sourceModelOptions.length > 0 && (
-        <datalist id={sourceListId}>
-          {props.sourceModelOptions.map((model) => (
-            <option key={model} value={model} />
-          ))}
-        </datalist>
-      )}
-      {props.targetModelOptions && props.targetModelOptions.length > 0 && (
-        <datalist id={targetListId}>
-          {props.targetModelOptions.map((model) => (
-            <option key={model} value={model} />
-          ))}
-        </datalist>
-      )}
     </div>
   )
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -414,6 +415,56 @@ func GetChannel(c *gin.Context) {
 		"data":    channel,
 	})
 	return
+}
+
+// GetChannelModelsAggregate 返回全站所有渠道的模型聚合数据，供前端
+// 模型映射编辑器的原始模型候选使用：
+//   - channel_models:   所有渠道 models 的并集（去重）
+//   - mapping_sources:  所有渠道 model_mapping 的 key（原始模型）并集（去重）
+func GetChannelModelsAggregate(c *gin.Context) {
+	channels, err := model.GetAllChannelsModelsMapping()
+	if err != nil {
+		common.SysError("failed to get channel models aggregate: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道模型聚合数据失败，请稍后重试"})
+		return
+	}
+
+	channelModels := make(map[string]bool)
+	mappingSources := make(map[string]bool)
+	for _, ch := range channels {
+		for _, m := range ch.GetModels() {
+			if trimmed := strings.TrimSpace(m); trimmed != "" {
+				channelModels[trimmed] = true
+			}
+		}
+		mapping := ch.GetModelMapping()
+		if mapping == "" || mapping == "{}" {
+			continue
+		}
+		var parsed map[string]string
+		if err := json.Unmarshal([]byte(mapping), &parsed); err != nil {
+			continue
+		}
+		for source := range parsed {
+			if trimmed := strings.TrimSpace(source); trimmed != "" {
+				mappingSources[trimmed] = true
+			}
+		}
+	}
+
+	toSortedSlice := func(set map[string]bool) []string {
+		keys := make([]string, 0, len(set))
+		for k := range set {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+
+	common.ApiSuccess(c, gin.H{
+		"channel_models":  toSortedSlice(channelModels),
+		"mapping_sources": toSortedSlice(mappingSources),
+	})
 }
 
 // GetChannelKey 获取渠道密钥（需要通过安全验证中间件）

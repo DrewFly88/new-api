@@ -132,6 +132,7 @@ import {
   getAllModels,
   getChannel,
   getChannelKey,
+  getChannelModelsAggregate,
   getGroups,
   getPrefillGroups,
   refreshCodexCredential,
@@ -184,7 +185,10 @@ import {
 } from '../dialogs/missing-models-confirmation-dialog'
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
-import { ModelMappingEditor } from '../model-mapping-editor'
+import {
+  ModelMappingEditor,
+  type ModelMappingOptionGroup,
+} from '../model-mapping-editor'
 import {
   ChannelAdvancedSection,
   ChannelApiAccessSection,
@@ -622,6 +626,9 @@ export function ChannelMutateDrawer({
   )
   const canRevealChannelKey = currentUser?.role === ROLE.SUPER_ADMIN
   const [fetchModelsDialogOpen, setFetchModelsDialogOpen] = useState(false)
+  // Snapshot of the last fetched upstream model list, used by the model
+  // mapping editor's replacement model candidates.
+  const [upstreamModels, setUpstreamModels] = useState<string[]>([])
   const [channelKey, setChannelKey] = useState<string | null>(null)
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
   const [isCodexCredentialRefreshing, setIsCodexCredentialRefreshing] =
@@ -685,6 +692,14 @@ export function ChannelMutateDrawer({
     queryFn: () => getPrefillGroups('model'),
   })
 
+  // Fetch aggregated channel models & mapping sources across all channels,
+  // used to build the model mapping editor's source model candidates.
+  const { data: channelModelsAggregate } = useQuery({
+    queryKey: ['channel_models_aggregate'],
+    queryFn: () => getChannelModelsAggregate(),
+    staleTime: 30_000,
+  })
+
   const { copyToClipboard } = useCopyToClipboard()
 
   const {
@@ -702,8 +717,10 @@ export function ChannelMutateDrawer({
     if (!open) {
       setChannelKey(null)
       setIsChannelKeyLoading(false)
+      setUpstreamModels([])
     } else if (channelId) {
       setChannelKey(null)
+      setUpstreamModels([])
     }
   }, [open, channelId])
 
@@ -923,6 +940,82 @@ export function ChannelMutateDrawer({
     () => parseModelsString(currentModels),
     [currentModels]
   )
+
+  // Build grouped source-model candidates for the mapping editor:
+  //   1. Current channel models
+  //   2. All channels' mapping sources (excluding current channel models)
+  //   3. Other models found in any channel's models list (excluding the above)
+  const sourceModelGroups = useMemo<ModelMappingOptionGroup[]>(() => {
+    const aggregate = channelModelsAggregate?.data
+    const currentSet = new Set(currentModelsArray)
+    const mappingSources = aggregate?.mapping_sources ?? []
+    const channelModels = aggregate?.channel_models ?? []
+
+    const groups: ModelMappingOptionGroup[] = []
+    if (currentModelsArray.length > 0) {
+      groups.push({ label: t('Current channel models'), items: currentModelsArray })
+    }
+
+    const otherMappingSources = mappingSources.filter(
+      (model) => !currentSet.has(model)
+    )
+    if (otherMappingSources.length > 0) {
+      groups.push({
+        label: t('All channel mapping sources'),
+        items: otherMappingSources,
+      })
+    }
+
+    const mappingSet = new Set(mappingSources)
+    const otherModels = channelModels.filter(
+      (model) => !currentSet.has(model) && !mappingSet.has(model)
+    )
+    if (otherModels.length > 0) {
+      groups.push({ label: t('Other models'), items: otherModels })
+    }
+
+    return groups
+  }, [channelModelsAggregate, currentModelsArray, t])
+
+  // Replacement model candidates:
+  //   1. Upstream models (only after the user fetched them via the dialog)
+  //   2. Global models grouped by vendor, excluding upstream duplicates
+  const targetModelGroups = useMemo<ModelMappingOptionGroup[]>(() => {
+    const upstreamSet = new Set(upstreamModels)
+    const groups: ModelMappingOptionGroup[] = []
+    if (upstreamModels.length > 0) {
+      groups.push({
+        label: t('Upstream models'),
+        items: [...upstreamModels],
+      })
+    }
+
+    const byVendor = new Map<string, Set<string>>()
+    for (const model of allModelsData?.data ?? []) {
+      const id = model.id?.trim()
+      if (!id || upstreamSet.has(id)) continue
+      const vendor =
+        (typeof model.owned_by === 'string' && model.owned_by.trim()) ||
+        'Custom'
+      const bucket = byVendor.get(vendor) ?? new Set<string>()
+      bucket.add(id)
+      byVendor.set(vendor, bucket)
+    }
+    const vendorGroups = [...byVendor.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([vendor, items]) => ({
+        label: vendor,
+        items: [...items].sort(),
+        defaultCollapsed: true,
+      }))
+    if (vendorGroups.length > 0) {
+      groups.push({
+        label: t('Global models'),
+        groups: vendorGroups,
+      })
+    }
+    return groups
+  }, [upstreamModels, allModelsData, t])
 
   // DeepSeek V4 reasoning_content guard is shown only when the channel's
   // configured models include a deepseek-v4-* model. Triggered by model
@@ -3538,10 +3631,8 @@ export function ChannelMutateDrawer({
                                       value={field.value || ''}
                                       onChange={field.onChange}
                                       disabled={isSubmitting}
-                                      sourceModelOptions={currentModelsArray}
-                                      targetModelOptions={modelOptions.map(
-                                        (option) => option.value
-                                      )}
+                                      sourceModelGroups={sourceModelGroups}
+                                      targetModelGroups={targetModelGroups}
                                     />
                                   </FormControl>
                                   {modelMappingGuardrail.invalidJson && (
@@ -4924,6 +5015,7 @@ export function ChannelMutateDrawer({
         onModelsSelected={(models) => {
           form.setValue('models', formatModelsArray(models))
         }}
+        onFetched={setUpstreamModels}
         redirectModels={redirectModelList}
         redirectSourceModels={redirectModelKeyList}
         customFetcher={

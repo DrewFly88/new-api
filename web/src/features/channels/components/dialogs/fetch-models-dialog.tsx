@@ -60,6 +60,8 @@ type FetchModelsDialogBaseProps = {
   redirectSourceModels?: string[]
   customFetcher?: () => Promise<string[]>
   channelName?: string | null
+  /** Notifies the parent with the fetched upstream model list. */
+  onFetched?: (models: string[]) => void
 }
 
 type FetchModelsDialogProps = FetchModelsDialogBaseProps &
@@ -83,6 +85,7 @@ export function FetchModelsDialog({
   customFetcher,
   existingModelsOverride,
   channelName,
+  onFetched,
 }: FetchModelsDialogProps) {
   const { t } = useTranslation()
   const { currentRow } = useChannels()
@@ -147,6 +150,7 @@ export function FetchModelsDialog({
       if (customFetcher) {
         const list = await customFetcher()
         setFetchedModels(list)
+        onFetched?.(list)
         setSelectedModels(existingModels)
         toast.success(t('Fetched {{count}} models', { count: list.length }))
       } else if (activeChannel) {
@@ -154,11 +158,13 @@ export function FetchModelsDialog({
         if (response.success) {
           const list = Array.isArray(response.data) ? response.data : []
           setFetchedModels(list)
+          onFetched?.(list)
           setSelectedModels(existingModels)
           toast.success(t('Fetched {{count}} models', { count: list.length }))
         } else {
           toast.error(response.message || t('Failed to fetch models'))
           setFetchedModels([])
+          onFetched?.([])
         }
       }
     } catch (error: unknown) {
@@ -166,6 +172,7 @@ export function FetchModelsDialog({
         error instanceof Error ? error.message : t('Failed to fetch models')
       )
       setFetchedModels([])
+      onFetched?.([])
     } finally {
       setIsFetching(false)
     }

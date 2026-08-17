@@ -386,6 +386,14 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
+// GetAllChannelsModelsMapping 仅返回所有渠道的 models 与 model_mapping 字段，
+// 用于前端模型映射候选聚合（避免拉取 key 等敏感字段）。
+func GetAllChannelsModelsMapping() ([]*Channel, error) {
+	var channels []*Channel
+	err := DB.Model(&Channel{}).Select("models", "model_mapping").Find(&channels).Error
+	return channels, err
+}
+
 func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	modelsCol := "`models`"

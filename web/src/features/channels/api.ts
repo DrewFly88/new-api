@@ -606,6 +606,22 @@ export async function getEnabledModels(): Promise<{
   return res.data
 }
 
+/**
+ * Get aggregated channel models & mapping sources across all channels.
+ * Used to build the model mapping editor's source model candidates.
+ */
+export async function getChannelModelsAggregate(): Promise<{
+  success: boolean
+  message?: string
+  data?: {
+    channel_models: string[]
+    mapping_sources: string[]
+  }
+}> {
+  const res = await api.get('/api/channel/models_aggregate')
+  return res.data
+}
+
 // ============================================================================
 // Ollama Utilities
 // ============================================================================
