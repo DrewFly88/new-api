@@ -38,6 +38,8 @@ import { useModels } from './models-provider'
 
 const route = getRouteApi('/_authenticated/models/$section')
 
+const MODELS_COLUMN_VISIBILITY_STORAGE_KEY = 'models:metadata:column-visibility'
+
 export function ModelsTable() {
   const { t } = useTranslation()
   const { selectedVendor } = useModels()
@@ -164,6 +166,7 @@ export function ModelsTable() {
       bound_channels: false,
       quota_types: false,
     },
+    columnVisibilityStorageKey: MODELS_COLUMN_VISIBILITY_STORAGE_KEY,
     columnFilters,
     pagination,
     globalFilter,

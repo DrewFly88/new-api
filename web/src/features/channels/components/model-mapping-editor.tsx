@@ -44,6 +44,8 @@ export type ModelMappingOptionGroup = {
   groups?: ModelMappingOptionGroup[]
   /** Collapsed on first open when true. */
   defaultCollapsed?: boolean
+  /** Render the group header even when it has no items and no sub-groups. */
+  showWhenEmpty?: boolean
 }
 
 const GROUP_PATH_SEPARATOR = '\u0000'
@@ -132,7 +134,10 @@ function GroupedComboboxInput({
           : group.label
         const items = filterItems(group.items)
         const subNodes = build(group.groups ?? [], path, depth + 1)
-        if (items.length === 0 && subNodes.length === 0) continue
+        const isEmpty = items.length === 0 && subNodes.length === 0
+        // Empty groups are hidden while searching, but may still be shown
+        // (e.g. an unfetched "Upstream models" group) otherwise.
+        if (isEmpty && !(group.showWhenEmpty && !normalizedQuery)) continue
 
         const expanded = isExpanded(path, group)
         nodes.push(

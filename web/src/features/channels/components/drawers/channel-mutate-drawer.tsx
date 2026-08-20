@@ -154,6 +154,7 @@ import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
   CHANNEL_FORM_DEFAULT_VALUES,
   CHANNEL_TYPE_ADVANCED_CUSTOM,
+  categorizeModels,
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
@@ -953,7 +954,11 @@ export function ChannelMutateDrawer({
 
     const groups: ModelMappingOptionGroup[] = []
     if (currentModelsArray.length > 0) {
-      groups.push({ label: t('Current channel models'), items: currentModelsArray })
+      groups.push({
+        label: t('Current channel models'),
+        items: currentModelsArray,
+        defaultCollapsed: true,
+      })
     }
 
     const otherMappingSources = mappingSources.filter(
@@ -963,6 +968,7 @@ export function ChannelMutateDrawer({
       groups.push({
         label: t('All channel mapping sources'),
         items: otherMappingSources,
+        defaultCollapsed: true,
       })
     }
 
@@ -971,24 +977,42 @@ export function ChannelMutateDrawer({
       (model) => !currentSet.has(model) && !mappingSet.has(model)
     )
     if (otherModels.length > 0) {
-      groups.push({ label: t('Other models'), items: otherModels })
+      groups.push({
+        label: t('Other models'),
+        items: otherModels,
+        defaultCollapsed: true,
+      })
     }
 
     return groups
   }, [channelModelsAggregate, currentModelsArray, t])
 
   // Replacement model candidates:
-  //   1. Upstream models (only after the user fetched them via the dialog)
+  //   1. Upstream models grouped by category (shown even before fetching)
   //   2. Global models grouped by vendor, excluding upstream duplicates
   const targetModelGroups = useMemo<ModelMappingOptionGroup[]>(() => {
     const upstreamSet = new Set(upstreamModels)
     const groups: ModelMappingOptionGroup[] = []
-    if (upstreamModels.length > 0) {
-      groups.push({
-        label: t('Upstream models'),
-        items: [...upstreamModels],
+
+    // Group upstream models by the same category rules used in the fetch
+    // dialog, so the replacement candidates mirror the upstream listing.
+    const upstreamCategories = Object.entries(categorizeModels(upstreamModels))
+      .sort(([a], [b]) => {
+        if (a === 'Other') return 1
+        if (b === 'Other') return -1
+        return a.localeCompare(b, undefined, { sensitivity: 'base' })
       })
-    }
+      .map(([category, items]) => ({
+        label: category,
+        items: [...items].sort(),
+        defaultCollapsed: true,
+      }))
+    groups.push({
+      label: t('Upstream models'),
+      groups: upstreamCategories,
+      defaultCollapsed: true,
+      showWhenEmpty: true,
+    })
 
     const byVendor = new Map<string, Set<string>>()
     for (const model of allModelsData?.data ?? []) {
@@ -1008,12 +1032,12 @@ export function ChannelMutateDrawer({
         items: [...items].sort(),
         defaultCollapsed: true,
       }))
-    if (vendorGroups.length > 0) {
-      groups.push({
-        label: t('Global models'),
-        groups: vendorGroups,
-      })
-    }
+    groups.push({
+      label: t('Global models'),
+      groups: vendorGroups,
+      defaultCollapsed: true,
+      showWhenEmpty: true,
+    })
     return groups
   }, [upstreamModels, allModelsData, t])
 
@@ -1667,6 +1691,9 @@ export function ChannelMutateDrawer({
         queryKey: channelsQueryKeys.detail(channelId),
       })
     }
+    // Refresh the aggregated mapping sources so other channels see the
+    // latest candidates immediately after this channel is saved.
+    queryClient.invalidateQueries({ queryKey: ['channel_models_aggregate'] })
     onOpenChange(false)
     setOpen(null)
   }, [channelId, queryClient, onOpenChange, setOpen])
