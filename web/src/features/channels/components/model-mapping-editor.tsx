@@ -76,10 +76,9 @@ function GroupedComboboxInput({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [highlightedIndex, setHighlightedIndex] = useState(-1)
-  // Per-group-path collapse overrides; falls back to defaultCollapsed.
-  const [userCollapsed, setUserCollapsed] = useState<Record<string, boolean>>(
-    {}
-  )
+  // Per-group-path expansion overrides; falls back to defaultCollapsed.
+  // true = user expanded, false = user collapsed, undefined = follow default.
+  const [userExpanded, setUserExpanded] = useState<Record<string, boolean>>({})
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -89,13 +88,16 @@ function GroupedComboboxInput({
     path: string,
     group: ModelMappingOptionGroup
   ): boolean => {
-    // Searching force-expands every group so matches stay visible.
+    // Manual toggles always win so groups stay collapsible while searching.
+    const override = userExpanded[path]
+    if (override !== undefined) return override
+    // Searching force-expands untouched groups so matches stay visible.
     if (normalizedQuery) return true
-    return userCollapsed[path] ?? !group.defaultCollapsed
+    return !group.defaultCollapsed
   }
 
   const toggleGroup = (path: string, expanded: boolean) => {
-    setUserCollapsed((previous) => ({
+    setUserExpanded((previous) => ({
       ...previous,
       [path]: !expanded,
     }))
@@ -206,7 +208,7 @@ function GroupedComboboxInput({
 
     return { renderedNodes: build(groups, '', 0), flatItems: flat }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, normalizedQuery, userCollapsed, value, highlightedIndex])
+  }, [groups, normalizedQuery, userExpanded, value, highlightedIndex])
 
   const totalItems = flatItems.length
 
@@ -228,7 +230,7 @@ function GroupedComboboxInput({
 
   useEffect(() => {
     setHighlightedIndex(-1)
-  }, [query, groups, userCollapsed])
+  }, [query, groups, userExpanded])
 
   const commit = (nextValue: string) => {
     onValueChange(nextValue)
@@ -287,7 +289,12 @@ function GroupedComboboxInput({
     items[highlightedIndex]?.scrollIntoView({ block: 'nearest' })
   }, [highlightedIndex, renderedNodes])
 
-  const showDropdown = open && (totalItems > 0 || Boolean(query.trim()))
+  // Render whenever there is anything to show: group headers (even when all
+  // groups are collapsed), visible items, or a "no matches" hint while
+  // searching. Requiring visible items alone would hide the dropdown when
+  // every group is collapsed by default, making it impossible to open.
+  const showDropdown =
+    open && (renderedNodes.length > 0 || Boolean(query.trim()))
 
   return (
     <div ref={containerRef} className='relative'>
@@ -301,7 +308,7 @@ function GroupedComboboxInput({
         aria-label={ariaLabel}
         autoComplete='off'
         placeholder={placeholder}
-        value={open ? query : value}
+        value={query || value}
         disabled={disabled}
         onChange={(event) => {
           const nextValue = event.target.value
@@ -309,9 +316,12 @@ function GroupedComboboxInput({
           onValueChange(nextValue)
           if (!open) setOpen(true)
         }}
-        onFocus={() => {
-          setQuery(value)
-          setOpen(true)
+        onFocus={() => setOpen(true)}
+        onClick={() => {
+          // Reopen when the input (or the arrow over it) is clicked while it
+          // already has focus and the dropdown is closed (e.g. after picking
+          // an item focus stays in the input, so onFocus will not fire).
+          if (!open) setOpen(true)
         }}
         onKeyDown={handleKeyDown}
         className='pr-9'
@@ -320,7 +330,7 @@ function GroupedComboboxInput({
 
       {showDropdown && (
         <div className='bg-popover text-popover-foreground absolute top-full z-100 mt-1 w-full rounded-md border shadow-md'>
-          {totalItems > 0 ? (
+          {renderedNodes.length > 0 ? (
             <ul
               role='listbox'
               className='max-h-[240px] overflow-y-auto p-1'
