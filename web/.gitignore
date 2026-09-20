@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Package manager lockfiles: this project uses Bun (bun.lock), so ignore npm/pnpm/yarn lockfiles
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
 .env
 
 # Editor directories and files
