@@ -39,6 +39,7 @@
       "main.js",
       "preload.js",
       "icon.png",
+      "icon.ico",
       "tray-iconTemplate.png",
       "tray-iconTemplate@2x.png",
       "tray-icon-windows.png"
@@ -83,7 +84,7 @@
       ]
     },
     "win": {
-      "icon": "icon.png",
+      "icon": "icon.ico",
       "target": [
         "nsis",
         "portable"
